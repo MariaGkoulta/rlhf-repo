@@ -8,6 +8,15 @@ from reward_model import RewardModel
 import random
 import matplotlib.pyplot as plt
 from line_profiler import profile
+from visualizations import (
+    visualize_reward_evolution,
+    visualize_reward_model_loss, 
+    visualize_reward_correlation,
+    visualize_uncertainty_evolution,
+    visualize_uncertainty_comparison,
+    visualize_preference_accuracy,
+    visualize_evaluation_rewards
+)
 
 class OnlineRLHF:
 
@@ -24,7 +33,6 @@ class OnlineRLHF:
 
     @profile
     def compute_trajectory_reward(self, trajectory):
-        # OPTIMIZATION: Convert directly to tensor without going through numpy
         states = torch.tensor([step[0] for step in trajectory], 
                             dtype=torch.float32, device=self.device)
         actions = torch.tensor([step[1] for step in trajectory], 
@@ -212,30 +220,13 @@ class OnlineRLHF:
         """
         Create visualization showing evolution of rewards over training iterations
         """
-        plt.figure(figsize=(10, 6))
-        plt.plot(iterations, rewards, 'b-o', linewidth=2)
-        plt.title('Reward Evolution During Training')
-        plt.xlabel('Iteration')
-        plt.ylabel('Average Reward')
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig('reward_evolution.png')
-        plt.show()
+        visualize_reward_evolution(iterations, rewards)
         
     def visualize_reward_model_loss(self, iterations, losses):
         """
         Create visualization showing the reward model loss during training
         """
-        plt.figure(figsize=(10, 6))
-        plt.plot(iterations, losses, 'r-o', linewidth=2)
-        plt.title('Reward Model Loss During Training')
-        plt.xlabel('Iteration')
-        plt.ylabel('Loss')
-        plt.yscale('log')  # Log scale often helps visualize loss curves
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig('reward_model_loss.png')
-        plt.show()
+        visualize_reward_model_loss(iterations, losses)
 
     def visualize_reward_correlation(self, true_rewards, predicted_rewards):
         """
@@ -245,28 +236,7 @@ class OnlineRLHF:
             true_rewards: List of true rewards from the environment
             predicted_rewards: List of predicted rewards from the reward model
         """
-        plt.figure(figsize=(10, 8))
-        
-        # Create scatter plot
-        plt.scatter(true_rewards, predicted_rewards, alpha=0.6)
-        
-        # Find the min and max across both axes to set equal limits
-        min_val = min(min(true_rewards), min(predicted_rewards))
-        max_val = max(max(true_rewards), max(predicted_rewards))
-        
-        # Add y=x line for reference (perfect correlation)
-        plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='y=x (perfect correlation)')
-        
-        # Calculate correlation coefficient
-        correlation = np.corrcoef(true_rewards, predicted_rewards)[0, 1]
-        plt.title(f'Correlation Between True and Predicted Rewards (r = {correlation:.3f})')
-        plt.xlabel('True Rewards (Environment)')
-        plt.ylabel('Predicted Rewards (Reward Model)')
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig('reward_correlation.png')
-        plt.show()
+        visualize_reward_correlation(true_rewards, predicted_rewards)
 
     @profile
     def estimate_uncertainty(self, traj1, traj2, n_samples=10):
@@ -351,7 +321,7 @@ class OnlineRLHF:
                         preferred = 0
                     else: 
                         preferred = random.randint(0, 1)
-                pairs.append((traj1, traj2, preferred))
+                    pairs.append((traj1, traj2, preferred))
 
             print(f"Created {len(pairs)} preference pairs")
 
@@ -390,21 +360,10 @@ class OnlineRLHF:
         
         self.env.close()
 
-            # After training completes, visualize uncertainty evolution
+        # After training completes, visualize uncertainty evolution
         if uncertainty_comparison_data:
             iterations_compared, random_avgs, active_avgs = zip(*uncertainty_comparison_data)
-            
-            plt.figure(figsize=(10, 6))
-            plt.plot(iterations_compared, random_avgs, 'r-o', label='Random Sampling')
-            plt.plot(iterations_compared, active_avgs, 'b-o', label='Uncertainty Sampling')
-            plt.title('Evolution of Uncertainty During Training')
-            plt.xlabel('Iteration')
-            plt.ylabel('Average Uncertainty')
-            plt.legend()
-            plt.grid(True)
-            plt.tight_layout()
-            plt.savefig('uncertainty_evolution.png')
-            plt.show()
+            visualize_uncertainty_evolution(iterations_compared, random_avgs, active_avgs)
         
         # Create reward evolution visualization
         self.visualize_reward_evolution(iteration_numbers, eval_rewards)
@@ -416,16 +375,7 @@ class OnlineRLHF:
         self.visualize_reward_correlation(true_rewards_data, predicted_rewards_data)
         
         # Plot preference prediction accuracy
-        plt.figure(figsize=(10, 6))
-        plt.plot(range(1, len(accuracy_history)+1), accuracy_history, 'g-o', linewidth=2)
-        plt.title('Preference Prediction Accuracy')
-        plt.xlabel('Evaluation')
-        plt.ylabel('Accuracy')
-        plt.grid(True)
-        plt.ylim(0, 1)
-        plt.tight_layout()
-        plt.savefig('preference_accuracy.png')
-        plt.show()
+        visualize_preference_accuracy(accuracy_history)
         
         return self.policy, self.reward_model
     
@@ -460,17 +410,7 @@ class OnlineRLHF:
         print(f"Uncertainty improvement: {np.mean(active_uncertainty)/np.mean(random_uncertainty):.2f}x")
         
         # Visualize the uncertainty distributions
-        plt.figure(figsize=(10, 6))
-        plt.hist(random_uncertainty, alpha=0.5, label='Random Sampling')
-        plt.hist(active_uncertainty, alpha=0.5, label='Uncertainty Sampling')
-        plt.xlabel('Uncertainty')
-        plt.ylabel('Frequency')
-        plt.title('Uncertainty Distribution: Random vs Active Sampling')
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig('uncertainty_comparison.png')
-        plt.show()
+        visualize_uncertainty_comparison(random_uncertainty, active_uncertainty)
         
         return random_pairs, uncertain_pairs
     
@@ -518,7 +458,7 @@ if __name__ == "__main__":
     # Initialize and run the RLHF algorithm
     rlhf = OnlineRLHF(env_name='CartPole-v1', device=device)
     policy, reward_model = rlhf.train(
-        iterations=70,
+        iterations=3,
         trajectories_per_iter=100,
         preference_pairs=300,
         reward_epochs=5,
@@ -528,15 +468,7 @@ if __name__ == "__main__":
     avg_reward, rewards_list = rlhf.evaluate_policy(num_episodes=20, max_steps=200, render=False)
     print(f"Final evaluation: Average reward = {avg_reward:.2f}")
     # Plot the rewards from the evaluation
-    plt.figure(figsize=(10, 6))
-    plt.plot(range(1, len(rewards_list)+1), rewards_list, 'b-o', linewidth=2)
-    plt.title('Rewards from Evaluation Episodes')
-    plt.xlabel('Episode')
-    plt.ylabel('Reward')
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig('evaluation_rewards.png')
-    plt.show()
+    visualize_evaluation_rewards(rewards_list)
 
     
     # Save the trained models
