@@ -114,3 +114,6 @@ dmypy.json
 
 # Ignore all PNG image files
 *.png
+
+# Ignore profiling files
+*.lprof
