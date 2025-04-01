@@ -17,7 +17,3 @@ git clone https://github.com/yourusername/active-rlhf.git
 # Install dependencies
 pip install -r requirements.txt
 ```
-
-
-## License
-[License information]
