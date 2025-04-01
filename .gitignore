@@ -117,3 +117,16 @@ dmypy.json
 
 # Ignore profiling files
 *.lprof
+
+# Ignore pickle files
+*.pkl
+
+# Ignore ds_store files
+.DS_Store
+
+# Ignore pth files
+*.pth
+
+# Ignore pt files
+*.pt
+
