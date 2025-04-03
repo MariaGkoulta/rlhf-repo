@@ -24,7 +24,12 @@ class RewardModel(nn.Module):
         return rewards
     
     def enable_dropout(self):
+        # Set to train mode to enable dropout (only for MC dropout inference)
         self.train()
+    
+    def disable_dropout(self):
+        # Set to eval mode to disable dropout (for normal inference)
+        self.eval()
     
     def get_reward(self, state, action):
         with torch.no_grad():
