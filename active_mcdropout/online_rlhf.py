@@ -20,7 +20,7 @@ from visualizations import (
 
 class OnlineRLHF:
 
-    def __init__(self, env_name='CartPole-v1', device='cpu', buffer_capacity=5000):
+    def __init__(self, env_name='CartPole-v1', device='cpu', buffer_capacity=5000, preference_buffer_capacity=5000):
         self.env = gym.make(env_name)
         self.device = device
         self.state_dim = self.env.observation_space.shape[0]
@@ -37,6 +37,13 @@ class OnlineRLHF:
         # Replay buffer for storing trajectories
         self.trajectory_buffer = []
         self.buffer_capacity = buffer_capacity
+
+        # Buffer for storing preference pairs
+        self.preference_buffer = []
+        self.preference_buffer_capacity = preference_buffer_capacity
+        
+        # Buffer to store all preference pairs ever used for training
+        self.all_training_preferences = []
 
     @profile
     def compute_trajectory_reward(self, trajectory):
@@ -84,6 +91,16 @@ class OnlineRLHF:
             excess = len(self.trajectory_buffer) - self.buffer_capacity
             self.trajectory_buffer = self.trajectory_buffer[excess:]
         print(f"Buffer size: {len(self.trajectory_buffer)} trajectories")
+    
+    # Add preference pairs to the preference buffer
+    @profile
+    def add_to_preference_buffer(self, preference_pairs):
+        """Add preference pairs to the preference buffer"""
+        self.preference_buffer.extend(preference_pairs)
+        if len(self.preference_buffer) > self.preference_buffer_capacity:
+            excess = len(self.preference_buffer) - self.preference_buffer_capacity
+            self.preference_buffer = self.preference_buffer[excess:]
+        print(f"Preference buffer size: {len(self.preference_buffer)} pairs")
 
     # Sample trajectories from the buffer
     @profile
@@ -107,8 +124,7 @@ class OnlineRLHF:
     
     # Create preference pairs by selecting the most uncertain pairs based on MC dropout
     @profile
-    def create_preference_pairs(self, trajectories, num_pairs=20, candidate_multiplier=2,
-                                w_uncertainty=0.7, w_reward_diff=0.3, w_diversity=0.2):
+    def create_preference_pairs(self, trajectories, num_pairs=20, candidate_multiplier=2):
         """
         Create preference pairs by selecting the most informative pairs based on a composite score
         that includes uncertainty, reward difference, and state space diversity.
@@ -140,30 +156,11 @@ class OnlineRLHF:
             else:
                 preferred = random.randint(0, 1)
 
-            # Uncertainty measure (using your existing MC dropout approach)
             uncertainty = self.estimate_uncertainty(traj1, traj2)
-
-            # Reward signal difference
-            reward_diff = abs(reward1 - reward2)
-
-            # Diversity: compute the mean state for each trajectory and use Euclidean distance.
-            # states1 = np.array([step[0] for step in traj1])
-            # states2 = np.array([step[0] for step in traj2])
-            # mean_state1 = states1.mean(axis=0)
-            # mean_state2 = states2.mean(axis=0)
-            # diversity = np.linalg.norm(mean_state1 - mean_state2)
-
-            # Composite score: weighted sum of the components
-            # composite_score = (w_uncertainty * uncertainty +
-            #                 w_reward_diff * reward_diff)
             composite_score = uncertainty
-
             candidate_pairs.append((traj1, traj2, preferred, composite_score))
 
-        # Sort candidate pairs by composite score in descending order
         candidate_pairs.sort(key=lambda x: x[3], reverse=True)
-
-        # Select the top num_pairs
         selected_pairs = [(traj1, traj2, preferred) for traj1, traj2, preferred, _ in candidate_pairs[:num_pairs]]
 
         print(f"Selected {num_pairs} pairs based on composite score from {num_candidates} candidates.")
@@ -183,6 +180,9 @@ class OnlineRLHF:
     @profile
     def train_reward_model(self, preference_pairs, epochs=5, batch_size=32):
         epoch_losses = []
+        
+        # Store all preference pairs used for training
+        self.all_training_preferences.extend(preference_pairs)
         
         for epoch in range(epochs):
             total_loss = 0
@@ -347,13 +347,29 @@ class OnlineRLHF:
             self.reward_model.disable_dropout()
         
         return uncertainty
+    
+    @profile
+    def sample_randomly(self, pairs_count, trajectories):
+        new_pairs = []
+        for _ in range(pairs_count):
+            idx1, idx2 = random.sample(range(len(trajectories)), 2)
+            traj1, reward1 = trajectories[idx1]
+            traj2, reward2 = trajectories[idx2]
+            if reward1 > reward2:
+                preferred = 1
+            elif reward2 > reward1:
+                preferred = 0
+            else:
+                preferred = random.randint(0, 1)
+            new_pairs.append((traj1, traj2, preferred))
+        return new_pairs
 
 
     @profile
     def train(self, iterations=20, trajectories_per_iter=100, preference_pairs=50, 
               reward_epochs=50, policy_rollouts=20, use_uncertainty=True, buffer_sample_ratio=0.5,
               recent_trajectory_ratio=0.3, use_buffer=True, return_metrics=False,
-              uncertainty_warmup_iterations=15):
+              uncertainty_warmup_iterations=15, use_historical_preferences=True):
         iteration_numbers = []
         eval_rewards = []
         reward_model_losses = []
@@ -373,56 +389,48 @@ class OnlineRLHF:
             avg_reward = np.mean([r for _, r in new_trajectories])
             print(f"Collected {len(new_trajectories)} trajectories. Average reward: {avg_reward:.2f}")
 
-
             if use_buffer:
                 self.add_to_buffer(new_trajectories)
                 buffer_samples_count = int(trajectories_per_iter * buffer_sample_ratio)
                 buffer_trajectories = self.sample_from_buffer(buffer_samples_count, recent_ratio=recent_trajectory_ratio) if len(self.trajectory_buffer) > 0 else []
-                new_samples_needed = trajectories_per_iter - len(buffer_trajectories)
-                new_samples = new_trajectories[:new_samples_needed] if new_samples_needed > 0 else []
-                combined_trajectories = buffer_trajectories + new_samples
-                # combined_trajectories = self.trajectory_buffer.copy()
-                # print(f"Using {len(combined_trajectories)} trajectories: {len(buffer_trajectories)} from buffer, {len(new_samples)} new")
+                combined_trajectories = buffer_trajectories
             else:
-                # Skip buffer usage - just use new trajectories directly
                 combined_trajectories = new_trajectories
                 print(f"Using  {len(combined_trajectories)} new trajectories (buffer disabled)")
-
-            # Check if we're still in the warm-up phase
-            in_warmup = iter < uncertainty_warmup_iterations
             
-            # Use uncertainty-based sampling only after the warm-up period
-            if use_uncertainty and not in_warmup:
-                print(f"Using uncertainty-based sampling (iteration {iter+1})")
-                pairs = self.create_preference_pairs(combined_trajectories, num_pairs=preference_pairs)
-                # Capture average uncertainty for plotting
-                avg_uncertainty = np.mean([self.estimate_uncertainty(traj1, traj2) for traj1, traj2, _ in pairs[:10]])  # Sample a subset to save time
+            # Calculate how many pairs to sample from historical data (25%) and how many to create new (75%)
+            historical_pairs_count = int(preference_pairs * 0.25) if use_historical_preferences and len(self.all_training_preferences) > 0 else 0
+            remaining_pairs = preference_pairs - historical_pairs_count
+            new_pairs_count = int(remaining_pairs * 0.50)
+            old_pairs_count = remaining_pairs - new_pairs_count
+            print(f"Sampling {historical_pairs_count} historical pairs, {new_pairs_count} new pairs and {old_pairs_count} old pairs")
+            
+            # Sample historical pairs if available
+            historical_pairs = []
+            if historical_pairs_count > 0:
+                historical_indices = random.sample(range(len(self.all_training_preferences)), 
+                                                min(historical_pairs_count, len(self.all_training_preferences)))
+                historical_pairs = [self.all_training_preferences[i] for i in historical_indices]
+                print(f"Sampled {len(historical_pairs)} historical preference pairs")
+            # historical_pairs = self.all_training_preferences[:historical_pairs_count] if use_historical_preferences else []
+
+            # from the new_trajectories sample new_pairs_count number of trajectories with uncertainty
+            if use_uncertainty:
+                new_pairs = self.create_preference_pairs(new_trajectories, num_pairs=new_pairs_count)
+                old_pairs = self.create_preference_pairs(combined_trajectories, num_pairs=old_pairs_count)
+                avg_uncertainty = np.mean([self.estimate_uncertainty(traj1, traj2) for traj1, traj2, _ in new_pairs[:10]]) 
                 uncertainty_values.append(avg_uncertainty)
             else:
-                # Use random sampling during warm-up or if uncertainty is disabled
-                pairs = []
-                for _ in range(preference_pairs):
-                    idx1, idx2 = random.sample(range(len(combined_trajectories)), 2)
-                    traj1, reward1 = combined_trajectories[idx1]
-                    traj2, reward2 = combined_trajectories[idx2]
-                    if reward1 > reward2:
-                        preferred = 1
-                    elif reward2 > reward1:
-                        preferred = 0
-                    else: 
-                        preferred = random.randint(0, 1)
-                    pairs.append((traj1, traj2, preferred))
-                
-                # Add dummy or 0 uncertainty value for consistency
+                new_pairs = self.sample_randomly(new_pairs_count, new_trajectories)
+                old_pairs = self.sample_randomly(old_pairs_count, combined_trajectories)
                 uncertainty_values.append(0.0)
-                
-                if in_warmup and use_uncertainty:
-                    print(f"Warm-up phase: Using random sampling (iteration {iter+1}/{uncertainty_warmup_iterations})")
-                else:
-                    print(f"Using random sampling (uncertainty disabled)")
 
-            print(f"Created {len(pairs)} preference pairs")
+            # Combine historical and new pairs
+            pairs = historical_pairs + new_pairs + old_pairs
+            print(f"Created {len(pairs)} preference pairs ({len(historical_pairs)} historical, {len(new_pairs)} new)")
 
+            # Train reward model (now using the combined pairs)
+            print(f"Training reward model on {len(pairs)} preference pairs")
             reward_loss = self.train_reward_model(pairs, epochs=reward_epochs)
             reward_model_losses.append(reward_loss)
             
@@ -537,7 +545,7 @@ if __name__ == "__main__":
     policy, reward_model, _ = rlhf.train(
         iterations=40,
         trajectories_per_iter=100,
-        preference_pairs=300,
+        preference_pairs=10,
         reward_epochs=5,
         policy_rollouts=100,
         buffer_sample_ratio=0.8,
