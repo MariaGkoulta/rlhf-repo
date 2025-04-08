@@ -100,7 +100,7 @@ class OnlineRLHF:
                 r1 = self.compute_trajectory_reward(traj1)
                 r2 = self.compute_trajectory_reward(traj2)
 
-                diff = r1 - r2
+                diff = (r1 - r2)
                 prob = torch.sigmoid(diff)
                 target = torch.tensor(float(preferred), dtype=torch.float32, device=self.device)
                 loss = self.reward_loss(prob.unsqueeze(0), target.unsqueeze(0))
@@ -325,18 +325,6 @@ class OnlineRLHF:
         return self.policy, self.reward_model
     
     def evaluate_policy(self, num_episodes=10, max_steps=200, render=False):
-        """
-        Evaluate the current policy by running it for a number of episodes.
-        
-        Args:
-            num_episodes: Number of evaluation episodes.
-            max_steps: Maximum steps per episode.
-            render: Whether to render the environment.
-            
-        Returns:
-            avg_reward: Average reward across episodes.
-            rewards_list: List of rewards per episode.
-        """
         rewards_list = []
         for episode in range(num_episodes):
             state, _ = self.env.reset()
@@ -369,10 +357,10 @@ if __name__ == "__main__":
     # Initialize and run the RLHF algorithm
     rlhf = OnlineRLHF(env_name='CartPole-v1', device=device)
     policy, reward_model = rlhf.train(
-        iterations=70,
+        iterations=30,
         trajectories_per_iter=100,
-        preference_pairs=300,
-        reward_epochs=70,
+        preference_pairs=10,
+        reward_epochs=5,
         policy_rollouts=100
     )
 
@@ -391,7 +379,7 @@ if __name__ == "__main__":
 
     
     # Save the trained models
-    torch.save(policy.state_dict(), 'policy_rlhf.pt')
-    torch.save(reward_model.state_dict(), 'reward_model.pt')
+    # torch.save(policy.state_dict(), 'policy_rlhf.pt')
+    # torch.save(reward_model.state_dict(), 'reward_model.pt')
     print("Training complete. Models saved.")
     

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class RewardModel(nn.Module):
-    def __init__(self, state_dim, hidden_dim=128, dropout_rate=0.1):
+    def __init__(self, state_dim, hidden_dim=2, dropout_rate=0.7):
         super(RewardModel, self).__init__()
         self.fc1 = nn.Linear(state_dim + 1, hidden_dim)  # +1 for action
         self.dropout1 = nn.Dropout(p=dropout_rate)
@@ -26,6 +26,9 @@ class RewardModel(nn.Module):
     def enable_dropout(self):
         self.train()
     
+    def disable_dropout(self):
+        self.eval()
+
     def get_reward(self, state, action):
         with torch.no_grad():
             return self.forward(state, action).item()
