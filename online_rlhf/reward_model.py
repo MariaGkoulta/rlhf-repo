@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class RewardModel(nn.Module):
-    def __init__(self, state_dim, hidden_dim=2, dropout_rate=0.7):
+    def __init__(self, state_dim, dropout_rate=0.5, hidden_dim=16):
         super(RewardModel, self).__init__()
         self.fc1 = nn.Linear(state_dim + 1, hidden_dim)  # +1 for action
         self.dropout1 = nn.Dropout(p=dropout_rate)

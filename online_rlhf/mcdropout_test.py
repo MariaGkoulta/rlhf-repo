@@ -15,20 +15,22 @@ CONFIG = {
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     'num_iterations': 50,
     'trajectories_per_iter': 1000,
-    'trajectories_to_collect': 100,
-    'preference_pairs': 5,
+    'trajectories_to_collect': 20,
+    'preference_pairs': 2,
+    'num_candidate_pairs': 50,
     'reward_epochs': 3,
     'policy_rollouts': 100,
-    'use_uncertainty': False,
+    'use_uncertainty': True,
     'max_steps': 500,
-    'dropout_rate': 0.5,
+    'dropout_rate': 0.9,
     'hidden_dim': 16,
     'reward_model_lr': 1e-3,
     'policy_lr': 1e-4,
     'reward_loss_fn': nn.BCELoss(),
     'gamma': 0.99,
-    'warmup_iterations': 10,
-    'history_preferences_multiplier': 3,
+    'warmup_iterations': 0,
+    'history_prefere'
+    'history_pairs_multiplier': 3,
 }
 
 class OnlineRLHF:
@@ -132,13 +134,13 @@ class OnlineRLHF:
                 r1_samples = []
 
                 for _ in range(n_samples):
-                    r1 = self.reward_model(states1_tensor, actions1_tensor)
+                    r1 = self.reward_model(states1_tensor, actions1_tensor).sum()
                     r1_samples.append(r1)
 
                 # calculate the variance of the samples
                 var1 = np.var(r1_samples)
                 variances.append(var1)
-                trajectories_uncertainty_list.append((traj1, reward))
+                trajectories_uncertainty_list.append((traj1, reward, var1))
 
                 total_uncertainty += var1
                 n_trajectories += 1
@@ -146,15 +148,62 @@ class OnlineRLHF:
         if not was_training:
             self.reward_model.disable_dropout()
 
-        # Sort trajectories by uncertainty
-        # sort according to the variance 
         sorted_ids = np.argsort(variances)
         sorted_ids = sorted_ids[::-1]
         trajectories_uncertainty_list = [trajectories_uncertainty_list[i] for i in sorted_ids]
+
         avg_uncertainty = total_uncertainty / n_trajectories if n_trajectories > 0 else 0
     
         return avg_uncertainty, trajectories_uncertainty_list
+    
+    def train_temp_model(self, trajectory_pair, preferred, epochs=1):
+        temp_model = copy.deepcopy(self.reward_model)
+        temp_optimizer = optim.Adam(temp_model.parameters(), lr=CONFIG['reward_model_lr'])
 
+        traj1, traj2, _ = trajectory_pair
+
+        states1 = torch.tensor([step[0] for step in traj1], dtype=torch.float32, device=self.device)
+        actions1 = torch.tensor([step[1] for step in traj1], dtype=torch.long, device=self.device)
+        states2 = torch.tensor([step[0] for step in traj2], dtype=torch.float32, device=self.device)
+        actions2 = torch.tensor([step[1] for step in traj2], dtype=torch.long, device=self.device)
+
+        for _ in range(epochs):
+            temp_optimizer.zero_grad()
+            r1 = temp_model(states1, actions1).sum()
+            r2 = temp_model(states2, actions2).sum()
+            diff = r1 - r2
+            prob = torch.sigmoid(diff)
+            target = torch.tensor(float(preferred), dtype=torch.float32, device=self.device)
+            loss = self.reward_loss(prob.unsqueeze(0), target.unsqueeze(0))
+            loss.backward()
+            temp_optimizer.step()
+
+        return temp_model
+    
+    def calculate_information_gain(self, traj_pair, trajectories, current_uncertainty, n_samples=10, train_epochs=5):
+        original_model_state = copy.deepcopy(self.reward_model.state_dict())
+
+        model_pref0 = self.train_temp_model(traj_pair, 0, epochs=train_epochs)
+        self.reward_model.load_state_dict(model_pref0.state_dict())
+        uncertainty_pref0, _ = self.calculate_model_uncertainty(trajectories, n_samples=n_samples)
+
+        self.reward_model.load_state_dict(original_model_state)
+        model_pref1 = self.train_temp_model(traj_pair, 1, epochs=train_epochs)
+        self.reward_model.load_state_dict(model_pref1.state_dict())
+        uncertainty_pref1, _ = self.calculate_model_uncertainty(trajectories, n_samples=n_samples)
+
+        self.reward_model.load_state_dict(original_model_state)
+        information_gain = current_uncertainty - (uncertainty_pref0 + uncertainty_pref1) / 2
+
+        return information_gain
+    
+    def sort_pairs_by_information_gain(self, pairs, trajectories, current_uncertainty, n_samples=10, train_epochs=5):
+        information_gains = []
+        for traj_pair in pairs:
+            info_gain = self.calculate_information_gain(traj_pair, trajectories, current_uncertainty, n_samples=n_samples, train_epochs=train_epochs)
+            information_gains.append(info_gain)
+        sorted_pairs = [x for _, x in sorted(zip(information_gains, pairs), reverse=True)]
+        return sorted_pairs
 
     def train_reward_model(self, preference_pairs, epochs=5):
         epoch_losses = []
@@ -325,7 +374,7 @@ class OnlineRLHF:
         plt.savefig('reward_correlation.png')
         # plt.show()
 
-    def train(self, iterations=20, trajectories_per_iter=200, trajectories_to_collect=10, preference_pairs=200, 
+    def train(self, iterations=20, trajectories_per_iter=200, trajectories_to_collect=10, preference_pairs=50, num_candidate_pairs=200,
               reward_epochs=3, policy_rollouts=20, use_uncertainty=True, warmup_iterations=10, history_pairs_multiplier=3):
         iteration_numbers = []
         eval_rewards = []
@@ -334,6 +383,8 @@ class OnlineRLHF:
         reward_mse_losses = []
         correlation_coeff_list = []
         reward_model_uncertainties = []
+        random_variances = []
+        uncertainty_variances = []
 
         true_rewards_data = []
         predicted_rewards_data = []
@@ -358,8 +409,34 @@ class OnlineRLHF:
             else:
                 trajectories = random.sample(trajectories, trajectories_to_collect)
 
-            pairs = self.create_preference_pairs(trajectories, num_pairs=preference_pairs)
-            print(f"Created {len(pairs)} preference pairs")
+            
+            random_trajectories = random.sample(trajectories_with_uncertainty, min(len(trajectories), trajectories_to_collect))
+            unc_trajectories = trajectories_with_uncertainty[:trajectories_to_collect]
+            random_trajectories_variance = [traj[2] for traj in random_trajectories]
+            unc_trajectories_variance = [traj[2] for traj in unc_trajectories]
+            print(f"Random trajectories variance: mean = {np.mean(random_trajectories_variance):.4f}, std = {np.std(random_trajectories_variance):.4f}")
+            print(f"Uncertainty trajectories variance: mean = {np.mean(unc_trajectories_variance):.4f}, std = {np.std(unc_trajectories_variance):.4f}")
+            random_variances.append(np.mean(random_trajectories_variance))
+            uncertainty_variances.append(np.mean(unc_trajectories_variance))
+
+            # remove third column from trajectories
+            trajectories = [(traj[0], traj[1]) for traj in trajectories]
+
+            # pairs = self.create_preference_pairs(trajectories, num_pairs=preference_pairs)
+            # print(f"Created {len(pairs)}  preference pairs")
+            candidate_pairs = self.create_preference_pairs(trajectories, num_pairs=num_candidate_pairs)
+            print(f"Created {len(candidate_pairs)} candidate preference pairs")
+            
+
+            # Sort pairs by information gain
+            if use_uncertainty:
+                sorted_pairs = self.sort_pairs_by_information_gain(candidate_pairs, trajectories, uncertainty)
+                pairs = sorted_pairs[:preference_pairs]
+            else:
+                pairs = random.sample(candidate_pairs, min(len(candidate_pairs), preference_pairs))
+            print(f"Selected {len(pairs)} preference pairs for training")
+
+
             history_pairs = []
             if len(self.preferences_history) > 0:
                 history_pairs = random.sample(self.preferences_history, min(len(self.preferences_history), history_pairs_multiplier * preference_pairs))
@@ -480,6 +557,20 @@ class OnlineRLHF:
         plt.savefig('model_uncertainties.png')
         # plt.show()
 
+        #plot random and uncertainty variances
+        plt.figure(figsize=(10, 6))
+        plt.plot(range(1, len(random_variances)+1), random_variances, 'b-o', linewidth=2, label='Random Variance')
+        plt.plot(range(1, len(uncertainty_variances)+1), uncertainty_variances, 'r-o', linewidth=2, label='Uncertainty Variance')
+        plt.title('Random and Uncertainty Variances')
+        plt.xlabel('Evaluation')
+        plt.ylabel('Variance')
+        plt.ylim(np.min(random_variances), np.max(uncertainty_variances))
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig('random_uncertainty_variances.png')
+        # plt.show()
+
         metrics_data = {
             'iteration_numbers': iteration_numbers,
             'eval_rewards': eval_rewards,
@@ -489,7 +580,9 @@ class OnlineRLHF:
             'accuracy_history': accuracy_history,
             'reward_mse_losses': reward_mse_losses,
             'correlation_coeff_list': correlation_coeff_list,
-            'reward_model_uncertainties': reward_model_uncertainties
+            'reward_model_uncertainties': reward_model_uncertainties,
+            'random_variances': random_variances,
+            'uncertainty_variances': uncertainty_variances,
         }
         results_folder = save_experiment_results(CONFIG, metrics_data)
 
@@ -526,16 +619,22 @@ if __name__ == "__main__":
     
     # Initialize and run the RLHF algorithm
     rlhf = OnlineRLHF(env_name='CartPole-v1', device=device)
+
+    rlhf.policy.load_state_dict(torch.load('baseline_policy.pt'))
+    rlhf.reward_model.load_state_dict(torch.load('baseline_reward_model.pt'))
+    print("Pretrained baseline models loaded.")
+
     policy, reward_model, results_folder = rlhf.train(
         iterations=CONFIG['num_iterations'],
         trajectories_per_iter=CONFIG['trajectories_per_iter'],
         trajectories_to_collect=CONFIG['trajectories_to_collect'],
         preference_pairs=CONFIG['preference_pairs'],
+        num_candidate_pairs=CONFIG['num_candidate_pairs'],
         reward_epochs=CONFIG['reward_epochs'],
         policy_rollouts=CONFIG['policy_rollouts'],
         use_uncertainty=CONFIG['use_uncertainty'],
         warmup_iterations=CONFIG['warmup_iterations'],
-        history_pairs_multiplier=CONFIG['history_preferences_multiplier']
+        history_pairs_multiplier=CONFIG['history_pairs_multiplier']
     )
 
     avg_reward, rewards_list = rlhf.evaluate_policy(num_episodes=20, max_steps=CONFIG['max_steps'], render=False)
