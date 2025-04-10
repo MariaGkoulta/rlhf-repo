@@ -14,17 +14,17 @@ This repository implements Reinforcement Learning with Human Feedback (RLHF) usi
 ```bash
 # Clone the repository
 git clone https://github.com/MariaGkoulta/rlhf-repo.git
-cd active-rlhf
+cd rlhf-repo
 
 # Create and activate conda environment
-conda create -n active-rlhf python=3.8
+conda create -n active-rlhf python=3.9
 conda activate active-rlhf
 
 # Install dependencies
 pip install -r requirements.txt
 
 # Run the MC Dropout test file
-python online_rlhf/mcdropout_test.py
+python3 online_rlhf/mcdropout_test.py
 ```
 
 If you want to run with the reward model frozen (as a sanity check):
