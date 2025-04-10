@@ -41,6 +41,10 @@ def run_experiment(use_uncertainty, run_id, max_time_hours=5):
         # Initialize and run the RLHF algorithm
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         rlhf = OnlineRLHF(env_name=config['env_name'], device=device)
+
+        rlhf.policy.load_state_dict(torch.load('baseline_policy.pt'))
+        rlhf.reward_model.load_state_dict(torch.load('baseline_reward_model.pt'))
+        print("Pretrained baseline models loaded.")
         
         # Train with the modified config
         policy, reward_model, results_folder = rlhf.train(
@@ -53,7 +57,7 @@ def run_experiment(use_uncertainty, run_id, max_time_hours=5):
             policy_rollouts=config['policy_rollouts'],
             use_uncertainty=config['use_uncertainty'],
             warmup_iterations=config['warmup_iterations'],
-            history_pairs_multiplier=config['history_preferences_multiplier']
+            history_pairs_multiplier=config['history_pairs_multiplier']
         )
 
         # Evaluate the trained policy
@@ -128,7 +132,7 @@ def main():
             json.dump(all_results, f, indent=4)
     
     # Run 5 experiments with uncertainty=False
-    for i in range(5):
+    for i in range(10):
         result = run_experiment(use_uncertainty=False, run_id=i+1)
         all_results["uncertainty_false"].append(result)
         
