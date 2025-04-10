@@ -13,7 +13,7 @@ This repository implements Reinforcement Learning with Human Feedback (RLHF) usi
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/active-rlhf.git
+git clone https://github.com/MariaGkoulta/rlhf-repo.git
 cd active-rlhf
 
 # Create and activate conda environment
