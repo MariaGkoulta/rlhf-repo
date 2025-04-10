@@ -16,8 +16,8 @@ CONFIG = {
     'num_iterations': 50,
     'trajectories_per_iter': 1000,
     'trajectories_to_collect': 20,
-    'preference_pairs': 2,
-    'num_candidate_pairs': 50,
+    'preference_pairs': 1,
+    'num_candidate_pairs': 5,
     'reward_epochs': 3,
     'policy_rollouts': 100,
     'use_uncertainty': True,
@@ -29,8 +29,9 @@ CONFIG = {
     'reward_loss_fn': nn.BCELoss(),
     'gamma': 0.99,
     'warmup_iterations': 0,
-    'history_prefere'
     'history_pairs_multiplier': 3,
+    'use_pretrained_models': False,
+    'save_models': False
 }
 
 class OnlineRLHF:
@@ -73,17 +74,14 @@ class OnlineRLHF:
             state, _ = self.env.reset()
             trajectory = []
             total_reward = 0
-
             for step in range(max_steps):
                 action, _ = self.select_action(state)
                 next_state, reward, done, truncated, info = self.env.step(action)
                 trajectory.append((state, action, reward, next_state, done))
                 total_reward += reward
                 state = next_state
-
                 if done or truncated:
                     break
-
             trajectories.append((trajectory, total_reward))
         return trajectories
     
@@ -110,7 +108,6 @@ class OnlineRLHF:
         for reward in reversed(rewards.tolist()):
             R = reward + gamma * R
             discounted_rewards.insert(0, R)
-            
         discounted_rewards = torch.tensor(discounted_rewards, dtype=torch.float32, device=self.device)
         discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-8)
         return discounted_rewards
@@ -441,8 +438,8 @@ class OnlineRLHF:
             if len(self.preferences_history) > 0:
                 history_pairs = random.sample(self.preferences_history, min(len(self.preferences_history), history_pairs_multiplier * preference_pairs))
 
-            reward_loss = self.train_reward_model(pairs + history_pairs, epochs=reward_epochs)
-            reward_model_losses.append(reward_loss)
+            # reward_loss = self.train_reward_model(pairs + history_pairs, epochs=reward_epochs)
+            # reward_model_losses.append(reward_loss)
             self.preferences_history.extend(pairs)
             
 
@@ -618,11 +615,12 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     
     # Initialize and run the RLHF algorithm
-    rlhf = OnlineRLHF(env_name='CartPole-v1', device=device)
+    rlhf = OnlineRLHF(env_name=CONFIG['env_name'], device=CONFIG['device'])
 
-    rlhf.policy.load_state_dict(torch.load('baseline_policy.pt'))
-    rlhf.reward_model.load_state_dict(torch.load('baseline_reward_model.pt'))
-    print("Pretrained baseline models loaded.")
+    if CONFIG['use_pretrained_models']:
+        rlhf.policy.load_state_dict(torch.load('baseline_policy.pt'))
+        rlhf.reward_model.load_state_dict(torch.load('baseline_reward_model.pt'))
+        print("Pretrained baseline models loaded.")
 
     policy, reward_model, results_folder = rlhf.train(
         iterations=CONFIG['num_iterations'],
@@ -653,7 +651,9 @@ if __name__ == "__main__":
     save_evaluation_results(results_folder, rewards_list, avg_reward)
     
     # Save the trained models
-    # torch.save(policy.state_dict(), 'policy_rlhf.pt')
-    # torch.save(reward_model.state_dict(), 'reward_model.pt')
+    if CONFIG['save_models']:
+        torch.save(policy.state_dict(), 'policy_rlhf.pt')
+        torch.save(reward_model.state_dict(), 'reward_model_rlhf.pt')
+
     print("Training complete. Models saved.")
     
