@@ -112,12 +112,10 @@ class OnlineRLHF:
         discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-8)
         return discounted_rewards
     
-    def calculate_model_uncertainty(self, trajectories, n_samples=10):
+    def calculate_model_uncertainty(self, trajectories, n_samples=10, num_bins=20):
         was_training = self.reward_model.training
         self.reward_model.enable_dropout()
-        variances = []
-        total_uncertainty = 0
-        n_trajectories = 0
+        state_action_entropies = []
         trajectories_uncertainty_list = []
 
         with torch.no_grad():
@@ -128,28 +126,45 @@ class OnlineRLHF:
                 states1_tensor = torch.tensor(np.array(states1), dtype=torch.float32, device=self.device)
                 actions1_tensor = torch.tensor(np.array(actions1), dtype=torch.long, device=self.device)
 
-                r1_samples = []
-
-                for _ in range(n_samples):
-                    r1 = self.reward_model(states1_tensor, actions1_tensor).sum()
-                    r1_samples.append(r1)
-
-                # calculate the variance of the samples
-                var1 = np.var(r1_samples)
-                variances.append(var1)
-                trajectories_uncertainty_list.append((traj1, reward, var1))
-
-                total_uncertainty += var1
-                n_trajectories += 1
+                # For each state-action pair, collect n_samples reward predictions
+                traj_entropies = []
+                for state, action in zip(states1_tensor, actions1_tensor):
+                    # Repeat state and action n_samples times
+                    state_repeated = state.unsqueeze(0).repeat(n_samples, 1)
+                    action_repeated = action.unsqueeze(0).repeat(n_samples)
+                    
+                    # Get reward predictions
+                    reward_samples = self.reward_model(state_repeated, action_repeated)
+                    
+                    # Convert to numpy for histogram computation
+                    reward_samples_np = reward_samples.cpu().numpy()
+                    
+                    # Create histogram of reward predictions
+                    hist, bin_edges = np.histogram(reward_samples_np, bins=num_bins, density=True)
+                    
+                    # Compute entropy from histogram
+                    # Add small epsilon to avoid log(0)
+                    hist = hist + 1e-10
+                    hist = hist / np.sum(hist)  # Normalize to get probabilities
+                    entropy = -np.sum(hist * np.log(hist))
+                    
+                    traj_entropies.append(entropy)
+                
+                # Average entropy across state-action pairs in trajectory
+                avg_traj_entropy = np.mean(traj_entropies)
+                trajectories_uncertainty_list.append((traj1, reward, avg_traj_entropy))
+                state_action_entropies.extend(traj_entropies)
 
         if not was_training:
             self.reward_model.disable_dropout()
 
-        sorted_ids = np.argsort(variances)
-        sorted_ids = sorted_ids[::-1]
+        # Sort trajectories by average entropy
+        sorted_ids = np.argsort([x[2] for x in trajectories_uncertainty_list])
+        sorted_ids = sorted_ids[::-1]  # Reverse to get descending order
         trajectories_uncertainty_list = [trajectories_uncertainty_list[i] for i in sorted_ids]
 
-        avg_uncertainty = total_uncertainty / n_trajectories if n_trajectories > 0 else 0
+        # Compute average entropy across all state-action pairs
+        avg_uncertainty = np.mean(state_action_entropies) if state_action_entropies else 0
     
         return avg_uncertainty, trajectories_uncertainty_list
     
@@ -199,6 +214,13 @@ class OnlineRLHF:
         for traj_pair in pairs:
             info_gain = self.calculate_information_gain(traj_pair, trajectories, current_uncertainty, n_samples=n_samples, train_epochs=train_epochs)
             information_gains.append(info_gain)
+        # plot information gains
+        plt.figure(figsize=(10, 6))
+        plt.plot(information_gains, 'r-o', linewidth=2)
+        plt.title('Information Gain')
+        plt.xlabel('Pair Index')
+        plt.ylabel('Information Gain')
+        plt.savefig('information_gain.png')
         sorted_pairs = [x for _, x in sorted(zip(information_gains, pairs), reverse=True)]
         return sorted_pairs
 
@@ -213,7 +235,7 @@ class OnlineRLHF:
                 r1 = self.compute_trajectory_reward(traj1)
                 r2 = self.compute_trajectory_reward(traj2)
 
-                diff = (r1 - r2)
+                diff = r1 - r2
                 prob = torch.sigmoid(diff)
                 target = torch.tensor(float(preferred), dtype=torch.float32, device=self.device)
                 loss = self.reward_loss(prob.unsqueeze(0), target.unsqueeze(0))
@@ -404,7 +426,7 @@ class OnlineRLHF:
             if use_uncertainty:
                 trajectories = trajectories_with_uncertainty[:trajectories_to_collect]
             else:
-                trajectories = random.sample(trajectories, trajectories_to_collect)
+                trajectories = random.sample(trajectories_with_uncertainty, trajectories_to_collect)
 
             
             random_trajectories = random.sample(trajectories_with_uncertainty, min(len(trajectories), trajectories_to_collect))
