@@ -438,8 +438,8 @@ class OnlineRLHF:
             if len(self.preferences_history) > 0:
                 history_pairs = random.sample(self.preferences_history, min(len(self.preferences_history), history_pairs_multiplier * preference_pairs))
 
-            # reward_loss = self.train_reward_model(pairs + history_pairs, epochs=reward_epochs)
-            # reward_model_losses.append(reward_loss)
+            reward_loss = self.train_reward_model(pairs + history_pairs, epochs=reward_epochs)
+            reward_model_losses.append(reward_loss)
             self.preferences_history.extend(pairs)
             
 
@@ -591,7 +591,7 @@ class OnlineRLHF:
             state, _ = self.env.reset()
             episode_reward = 0
             done = False
-            
+
             for _ in range(max_steps):
                 if render:
                     self.env.render()
@@ -603,7 +603,7 @@ class OnlineRLHF:
             
             rewards_list.append(episode_reward)
             print(f"Episode {episode+1}: Reward = {episode_reward}")
-        
+
         avg_reward = np.mean(rewards_list)
         print(f"Average reward over {num_episodes} episodes: {avg_reward:.2f}")
         return avg_reward, rewards_list
