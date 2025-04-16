@@ -126,31 +126,18 @@ class OnlineRLHF:
                 states1_tensor = torch.tensor(np.array(states1), dtype=torch.float32, device=self.device)
                 actions1_tensor = torch.tensor(np.array(actions1), dtype=torch.long, device=self.device)
 
-                # For each state-action pair, collect n_samples reward predictions
                 traj_entropies = []
                 for state, action in zip(states1_tensor, actions1_tensor):
-                    # Repeat state and action n_samples times
                     state_repeated = state.unsqueeze(0).repeat(n_samples, 1)
                     action_repeated = action.unsqueeze(0).repeat(n_samples)
-                    
-                    # Get reward predictions
                     reward_samples = self.reward_model(state_repeated, action_repeated)
-                    
-                    # Convert to numpy for histogram computation
                     reward_samples_np = reward_samples.cpu().numpy()
-                    
-                    # Create histogram of reward predictions
                     hist, bin_edges = np.histogram(reward_samples_np, bins=num_bins, density=True)
-                    
-                    # Compute entropy from histogram
-                    # Add small epsilon to avoid log(0)
                     hist = hist + 1e-10
-                    hist = hist / np.sum(hist)  # Normalize to get probabilities
+                    hist = hist / np.sum(hist)
                     entropy = -np.sum(hist * np.log(hist))
-                    
                     traj_entropies.append(entropy)
                 
-                # Average entropy across state-action pairs in trajectory
                 avg_traj_entropy = np.mean(traj_entropies)
                 trajectories_uncertainty_list.append((traj1, reward, avg_traj_entropy))
                 state_action_entropies.extend(traj_entropies)
@@ -158,12 +145,8 @@ class OnlineRLHF:
         if not was_training:
             self.reward_model.disable_dropout()
 
-        # Sort trajectories by average entropy
-        sorted_ids = np.argsort([x[2] for x in trajectories_uncertainty_list])
-        sorted_ids = sorted_ids[::-1]  # Reverse to get descending order
+        sorted_ids = np.argsort([x[2] for x in trajectories_uncertainty_list])[::-1]
         trajectories_uncertainty_list = [trajectories_uncertainty_list[i] for i in sorted_ids]
-
-        # Compute average entropy across all state-action pairs
         avg_uncertainty = np.mean(state_action_entropies) if state_action_entropies else 0
     
         return avg_uncertainty, trajectories_uncertainty_list
@@ -214,7 +197,6 @@ class OnlineRLHF:
         for traj_pair in pairs:
             info_gain = self.calculate_information_gain(traj_pair, trajectories, current_uncertainty, n_samples=n_samples, train_epochs=train_epochs)
             information_gains.append(info_gain)
-        # plot information gains
         plt.figure(figsize=(10, 6))
         plt.plot(information_gains, 'r-o', linewidth=2)
         plt.title('Information Gain')
@@ -294,17 +276,10 @@ class OnlineRLHF:
             loss_value = policy_loss.item()
             total_loss += loss_value
                 
-            # if (i + 1) % 5 == 0:
-            #     print(f"Policy update: Rollout {i+1}/{num_rollouts}, Loss: {loss_value:.4f}")
-        
         return total_loss / num_rollouts
         
     def evaluate_preference_accuracy(self, num_test_pairs=20):
-        """Evaluate how often the reward model correctly predicts preferences"""
-        # Collect test trajectories
         test_trajectories = self.collect_trajectories(num_trajectories=200)
-        
-        # Create preference pairs without adding them to training
         correct_predictions = 0
         reward_diff = []
         for _ in range(num_test_pairs):
@@ -313,11 +288,7 @@ class OnlineRLHF:
             traj2, reward2 = test_trajectories[idx2]
 
             reward_diff.append(np.abs(reward1-reward2))
-            
-            # Ground truth preference (using environment rewards)
             true_preferred = 1 if reward1 > reward2 else 0 if reward1 < reward2 else random.choice([0, 1])
-            
-            # Model's prediction
             with torch.no_grad():
                 r1 = self.compute_trajectory_reward(traj1)
                 r2 = self.compute_trajectory_reward(traj2)
@@ -334,9 +305,6 @@ class OnlineRLHF:
         return accuracy
 
     def visualize_reward_evolution(self, iterations, rewards):
-        """
-        Create visualization showing evolution of rewards over training iterations
-        """
         plt.figure(figsize=(10, 6))
         plt.plot(iterations, rewards, 'b-o', linewidth=2)
         plt.title('Reward Evolution During Training')
@@ -345,44 +313,24 @@ class OnlineRLHF:
         plt.grid(True)
         plt.tight_layout()
         plt.savefig('reward_evolution.png')
-        # plt.show()
         
     def visualize_reward_model_loss(self, iterations, losses):
-        """
-        Create visualization showing the reward model loss during training
-        """
         plt.figure(figsize=(10, 6))
         plt.plot(iterations, losses, 'r-o', linewidth=2)
         plt.title('Reward Model Loss During Training')
         plt.xlabel('Iteration')
         plt.ylabel('Loss')
-        plt.yscale('log')  # Log scale often helps visualize loss curves
+        plt.yscale('log')
         plt.grid(True)
         plt.tight_layout()
         plt.savefig('reward_model_loss.png')
-        # plt.show()
 
     def visualize_reward_correlation(self, true_rewards, predicted_rewards):
-        """
-        Create visualization showing correlation between true rewards and predicted rewards
-        
-        Args:
-            true_rewards: List of true rewards from the environment
-            predicted_rewards: List of predicted rewards from the reward model
-        """
         plt.figure(figsize=(10, 8))
-        
-        # Create scatter plot
         plt.scatter(true_rewards, predicted_rewards, alpha=0.6)
-        
-        # Find the min and max across both axes to set equal limits
         min_val = min(min(true_rewards), min(predicted_rewards))
         max_val = max(max(true_rewards), max(predicted_rewards))
-        
-        # Add y=x line for reference (perfect correlation)
         plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='y=x (perfect correlation)')
-        
-        # Calculate correlation coefficient
         correlation = np.corrcoef(true_rewards, predicted_rewards)[0, 1]
         plt.title(f'Correlation Between True and Predicted Rewards (r = {correlation:.3f})')
         plt.xlabel('True Rewards (Environment)')
@@ -391,7 +339,49 @@ class OnlineRLHF:
         plt.grid(True)
         plt.tight_layout()
         plt.savefig('reward_correlation.png')
-        # plt.show()
+
+
+    def compute_state_action_uncertainty(self, state, action, n_samples=20):
+        """Compute uncertainty (variance) of reward prediction for a given state and action using MC dropout."""
+        self.reward_model.enable_dropout()  # Ensure dropout is enabled
+        predictions = []
+        state_tensor = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+        action_tensor = torch.tensor([action], dtype=torch.long, device=self.device)
+        with torch.no_grad():
+            for _ in range(n_samples):
+                pred = self.reward_model(state_tensor, action_tensor).item()
+                predictions.append(pred)
+        variance = np.var(predictions)
+        return variance
+    
+    def plot_uncertainty_heatmap(self, n_bins=20, n_samples=20, n_repeats=5,
+                                 dim1_range=(-0.21, 0.21),  # pole angle range in radians
+                                 dim2_range=(-2.0, 2.0)):   # pole angular velocity range
+        heatmap = np.zeros((n_bins, n_bins))
+        dim1_vals = np.linspace(dim1_range[0], dim1_range[1], n_bins)
+        dim2_vals = np.linspace(dim2_range[0], dim2_range[1], n_bins)
+        for i, d1 in enumerate(dim1_vals):
+            for j, d2 in enumerate(dim2_vals):
+                state = np.array([0.0, 0.0, d1, d2])
+                uncertainties = []
+                # Average uncertainty over all actions
+                for action in range(self.action_dim):
+                    cell_uncertainties = []
+                    for _ in range(n_repeats):
+                        var_val = self.compute_state_action_uncertainty(state, action, n_samples)
+                        cell_uncertainties.append(var_val)
+                    uncertainties.append(np.mean(cell_uncertainties))
+                heatmap[i, j] = np.mean(uncertainties)
+        plt.figure(figsize=(8, 6))
+        plt.imshow(heatmap, extent=[dim2_range[0], dim2_range[1], dim1_range[0], dim1_range[1]],
+                   origin='lower', aspect='auto')
+        plt.colorbar(label='Variance (Model Uncertainty)')
+        plt.xlabel('Pole Angular Velocity')
+        plt.ylabel('Pole Angle')
+        plt.title('Heatmap of Reward Model Uncertainty (MC Dropout)')
+        plt.tight_layout()
+        plt.savefig('uncertainty_heatmap.png')
+        plt.show()
 
     def train(self, iterations=20, trajectories_per_iter=200, trajectories_to_collect=10, preference_pairs=50, num_candidate_pairs=200,
               reward_epochs=3, policy_rollouts=20, use_uncertainty=True, warmup_iterations=10, history_pairs_multiplier=3):
@@ -410,15 +400,12 @@ class OnlineRLHF:
         
         for iter in range(iterations):
             print(f"\nIteration {iter+1}/{iterations}")
-            # print whether model is in train mode
             print(f"Reward model training mode: {self.reward_model.training}")
             
-            # Collect trajectories
             trajectories = self.collect_trajectories(num_trajectories=trajectories_per_iter)
             avg_reward = np.mean([r for _, r in trajectories])
             print(f"Collected {len(trajectories)} trajectories. Average true reward: {avg_reward:.2f}")
 
-            # Calculate model uncertainty
             uncertainty, trajectories_with_uncertainty = self.calculate_model_uncertainty(trajectories, n_samples=20)
             print(f"Model uncertainty: {uncertainty:.4f}")
             reward_model_uncertainties.append(uncertainty)
@@ -428,7 +415,6 @@ class OnlineRLHF:
             else:
                 trajectories = random.sample(trajectories_with_uncertainty, trajectories_to_collect)
 
-            
             random_trajectories = random.sample(trajectories_with_uncertainty, min(len(trajectories), trajectories_to_collect))
             unc_trajectories = trajectories_with_uncertainty[:trajectories_to_collect]
             random_trajectories_variance = [traj[2] for traj in random_trajectories]
@@ -438,23 +424,17 @@ class OnlineRLHF:
             random_variances.append(np.mean(random_trajectories_variance))
             uncertainty_variances.append(np.mean(unc_trajectories_variance))
 
-            # remove third column from trajectories
             trajectories = [(traj[0], traj[1]) for traj in trajectories]
 
-            # pairs = self.create_preference_pairs(trajectories, num_pairs=preference_pairs)
-            # print(f"Created {len(pairs)}  preference pairs")
             candidate_pairs = self.create_preference_pairs(trajectories, num_pairs=num_candidate_pairs)
             print(f"Created {len(candidate_pairs)} candidate preference pairs")
             
-
-            # Sort pairs by information gain
             if use_uncertainty:
                 sorted_pairs = self.sort_pairs_by_information_gain(candidate_pairs, trajectories, uncertainty)
                 pairs = sorted_pairs[:preference_pairs]
             else:
                 pairs = random.sample(candidate_pairs, min(len(candidate_pairs), preference_pairs))
             print(f"Selected {len(pairs)} preference pairs for training")
-
 
             history_pairs = []
             if len(self.preferences_history) > 0:
@@ -464,7 +444,6 @@ class OnlineRLHF:
             reward_model_losses.append(reward_loss)
             self.preferences_history.extend(pairs)
             
-
             if iter % 4 == 0 or iter == iterations - 1:
                 accuracy = self.evaluate_preference_accuracy(num_test_pairs=20)
                 accuracy_history.append(accuracy)
@@ -472,20 +451,16 @@ class OnlineRLHF:
                 correlation_trajectories = self.collect_trajectories(num_trajectories=20)
                 
                 for trajectory, true_reward in correlation_trajectories:
-                    # Calculate predicted reward
                     with torch.no_grad():
                         predicted_reward = self.compute_trajectory_reward(trajectory).item()
-                    
                     true_rewards_data.append(true_reward)
                     predicted_rewards_data.append(predicted_reward)
                 
                 print(f"Collected {len(correlation_trajectories)} trajectories for reward correlation")
 
-
                 episode_losses = []
                 true_rewards_history = []
                 predicted_rewards_history = []
-                # for traj, true_reward in random.sample(self.trajectories_history, np.minimum(len(self.trajectories_history), 200)):
                 for traj, true_reward in self.trajectories_history[-min(len(self.trajectories_history), 200):]:
                     with torch.no_grad():
                         predicted_reward = self.compute_trajectory_reward(traj).item()
@@ -494,7 +469,7 @@ class OnlineRLHF:
                         true_rewards_history.append(true_reward)
                         predicted_rewards_history.append(predicted_reward)
                 mse_loss_avg = np.mean(episode_losses)
-                reward_mse_losses.append(mse_loss_avg.item())
+                reward_mse_losses.append(mse_loss_avg)
                 correlation = np.corrcoef(true_rewards_history, predicted_rewards_history)[0, 1]
                 print(f"Average predicted reward: {np.mean(predicted_rewards_history):.2f}")
                 print(f"Average true reward: {np.mean(true_rewards_history):.2f}")
@@ -502,33 +477,24 @@ class OnlineRLHF:
                 print(f"Correlation coefficient: {correlation:.3f}")
                 print(f"Reward model MSE loss: {mse_loss_avg:.4f}")
             
-            # Update policy
             if iter > warmup_iterations:
                 self.update_policy(num_rollouts=policy_rollouts, use_true_rewards=False)
             else:
                 self.update_policy(num_rollouts=policy_rollouts, use_true_rewards=True)
 
-            # Evaluate current policy
             eval_trajectories = self.collect_trajectories(num_trajectories=10)
             eval_reward = np.mean([r for _, r in eval_trajectories])
             print(f"Evaluation: Average reward = {eval_reward:.2f}")
             
-            # Store metrics
             iteration_numbers.append(iter + 1)
             eval_rewards.append(eval_reward)
         
         self.env.close()
         
-        # Create reward evolution visualization
         self.visualize_reward_evolution(iteration_numbers, eval_rewards)
-        
-        # Create reward model loss visualization
         self.visualize_reward_model_loss(iteration_numbers, reward_model_losses)
-
-        # Create reward correlation visualization
         self.visualize_reward_correlation(true_rewards_data, predicted_rewards_data)
         
-        # Plot preference prediction accuracy
         plt.figure(figsize=(10, 6))
         plt.plot(range(1, len(accuracy_history)+1), accuracy_history, 'g-o', linewidth=2)
         plt.title('Preference Prediction Accuracy')
@@ -538,9 +504,7 @@ class OnlineRLHF:
         plt.ylim(0, 1)
         plt.tight_layout()
         plt.savefig('preference_accuracy.png')
-        # plt.show()
 
-        # plot reward MSE losses with log
         plt.figure(figsize=(10, 6))
         plt.plot(range(1, len(reward_mse_losses)+1), reward_mse_losses, 'm-o', linewidth=2)
         plt.title('Reward Model MSE Losses')
@@ -550,9 +514,7 @@ class OnlineRLHF:
         plt.grid(True)
         plt.tight_layout()
         plt.savefig('reward_mse_losses.png')
-        # plt.show()
 
-        # plot correlation coefficients with log scale
         plt.figure(figsize=(10, 6))
         plt.plot(range(1, len(correlation_coeff_list)+1), correlation_coeff_list, 'c-o', linewidth=2)
         plt.title('Correlation Coefficients')
@@ -562,9 +524,7 @@ class OnlineRLHF:
         plt.grid(True)
         plt.tight_layout()
         plt.savefig('correlation_coefficients.png')
-        # plt.show()
 
-        # plot model uncertainties
         plt.figure(figsize=(10, 6))
         plt.plot(range(1, len(reward_model_uncertainties)+1), reward_model_uncertainties, 'y-o', linewidth=2)
         plt.title('Model Uncertainties')
@@ -574,9 +534,7 @@ class OnlineRLHF:
         plt.grid(True)
         plt.tight_layout()
         plt.savefig('model_uncertainties.png')
-        # plt.show()
 
-        #plot random and uncertainty variances
         plt.figure(figsize=(10, 6))
         plt.plot(range(1, len(random_variances)+1), random_variances, 'b-o', linewidth=2, label='Random Variance')
         plt.plot(range(1, len(uncertainty_variances)+1), uncertainty_variances, 'r-o', linewidth=2, label='Uncertainty Variance')
@@ -588,7 +546,6 @@ class OnlineRLHF:
         plt.grid(True)
         plt.tight_layout()
         plt.savefig('random_uncertainty_variances.png')
-        # plt.show()
 
         metrics_data = {
             'iteration_numbers': iteration_numbers,
@@ -632,11 +589,9 @@ class OnlineRLHF:
 
 
 if __name__ == "__main__":
-    # Set device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     
-    # Initialize and run the RLHF algorithm
     rlhf = OnlineRLHF(env_name=CONFIG['env_name'], device=CONFIG['device'])
 
     if CONFIG['use_pretrained_models']:
@@ -659,7 +614,6 @@ if __name__ == "__main__":
 
     avg_reward, rewards_list = rlhf.evaluate_policy(num_episodes=20, max_steps=CONFIG['max_steps'], render=False)
     print(f"Final evaluation: Average reward = {avg_reward:.2f}")
-    # Plot the rewards from the evaluation
     plt.figure(figsize=(10, 6))
     plt.plot(range(1, len(rewards_list)+1), rewards_list, 'b-o', linewidth=2)
     plt.title('Rewards from Evaluation Episodes')
@@ -668,14 +622,19 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.tight_layout()
     plt.savefig('evaluation_rewards.png')
-    # plt.show()
 
     save_evaluation_results(results_folder, rewards_list, avg_reward)
     
-    # Save the trained models
     if CONFIG['save_models']:
         torch.save(policy.state_dict(), 'policy_rlhf.pt')
         torch.save(reward_model.state_dict(), 'reward_model_rlhf.pt')
 
+    # ------------------------------------------------------------------------
+    # New: Generate and visualize the uncertainty heatmap
+    # Average uncertainties over multiple evaluations in the grid for robust results.
+    rlhf.plot_uncertainty_heatmap(n_bins=20, n_samples=20, n_repeats=5,
+                                  dim1_range=(-0.21, 0.21),    # Pole Angle range (radians)
+                                  dim2_range=(-2.0, 2.0))      # Pole Angular Velocity range
+    # ------------------------------------------------------------------------
+
     print("Training complete. Models saved.")
-    
