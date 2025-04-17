@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 
 # Import from the RLHF module
-from mcdropout_test import OnlineRLHF, CONFIG
+from ensemble_rlhf import OnlineRLHF, CONFIG
 from save_experiments import save_evaluation_results
 
 def run_experiment(use_uncertainty, run_id, max_time_hours=5):
@@ -75,15 +75,15 @@ def run_experiment(use_uncertainty, run_id, max_time_hours=5):
         plt.ylabel('Reward')
         plt.grid(True)
         plt.tight_layout()
-        eval_plot_name = f'evaluation_rewards_{uncertainty_str}_run_{run_id}.png'
+        eval_plot_name = f'{results_folder}/evaluation_rewards_{uncertainty_str}_run_{run_id}.png'
         plt.savefig(eval_plot_name)
-        
+
         # Save evaluation results
         save_evaluation_results(results_folder, rewards_list, avg_reward)
         
         # Record the runtime
         runtime = (time.time() - start_time) / 60  # in minutes
-        
+
         # Return results
         return {
             "run_id": run_id,
@@ -94,7 +94,7 @@ def run_experiment(use_uncertainty, run_id, max_time_hours=5):
             "timestamp": timestamp,
             "status": "completed",
         }
-        
+
     except Exception as e:
         runtime = (time.time() - start_time) / 60  # in minutes
         print(f"ERROR in experiment {run_name}: {str(e)}")
@@ -111,9 +111,9 @@ def run_experiment(use_uncertainty, run_id, max_time_hours=5):
 def main():
     # Create a directory for the comparative study results
     study_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    study_dir = f"uncertainty_study_{study_timestamp}"
+    study_dir = f"results/uncertainty_study_{study_timestamp}"
     os.makedirs(study_dir, exist_ok=True)
-    
+
     # Store all results
     all_results = {
         "uncertainty_true": [],
@@ -121,29 +121,29 @@ def main():
         "summary": {},
         "study_timestamp": study_timestamp,
     }
-    
+
     # Run 5 experiments with uncertainty=True
-    for i in range(10):
+    for i in range(1):
         result = run_experiment(use_uncertainty=True, run_id=i+1)
         all_results["uncertainty_true"].append(result)
-        
+
         # Save intermediate results after each run
         with open(os.path.join(study_dir, "results_so_far.json"), "w") as f:
             json.dump(all_results, f, indent=4)
-    
+
     # Run 5 experiments with uncertainty=False
-    for i in range(10):
+    for i in range(1):
         result = run_experiment(use_uncertainty=False, run_id=i+1)
         all_results["uncertainty_false"].append(result)
-        
+
         # Save intermediate results after each run
         with open(os.path.join(study_dir, "results_so_far.json"), "w") as f:
             json.dump(all_results, f, indent=4)
-    
+
     # Calculate summary statistics
     true_rewards = [r["avg_reward"] for r in all_results["uncertainty_true"] if r["avg_reward"] is not None]
     false_rewards = [r["avg_reward"] for r in all_results["uncertainty_false"] if r["avg_reward"] is not None]
-    
+
     if true_rewards:
         true_avg = np.mean(true_rewards)
         true_std = np.std(true_rewards)

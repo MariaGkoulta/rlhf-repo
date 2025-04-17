@@ -16,7 +16,7 @@ def save_experiment_results(config, metrics_data, diagrams_path=None):
     """
     # Create a timestamp-based folder name
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    folder_name = f"experiment_results_{timestamp}"
+    folder_name = f"results/experiment_results_{timestamp}"
     os.makedirs(folder_name, exist_ok=True)
 
     # Create a serializable copy of the config dictionary
@@ -63,7 +63,10 @@ def save_experiment_results(config, metrics_data, diagrams_path=None):
         'reward_mse_losses.png',
         'correlation_coefficients.png',
         'model_uncertainties.png',
-        'evaluation_rewards.png'
+        'evaluation_rewards.png',
+        'random_uncertainty_variances.png',
+        'uncertainty_heatmap.png',
+        'information_gain.png',
     ]
     
     for diagram in diagram_files:
