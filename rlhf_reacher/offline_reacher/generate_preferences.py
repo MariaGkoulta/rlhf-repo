@@ -14,6 +14,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.data import Dataset, DataLoader, random_split
 from stable_baselines3.common.callbacks import BaseCallback
+from datetime import datetime
 
 from tqdm import tqdm
 
@@ -60,7 +61,7 @@ class PreferenceDataset(Dataset):
         return self.s1[idx], self.a1[idx], self.s2[idx], self.a2[idx], self.prefs[idx]
 
 
-def collect_clips(policy, num_clips, segment_len, n_envs: int = 8):
+def collect_clips(policy, num_clips, segment_len, plot_dir, n_envs: int = 8):
     make_env = lambda: gym.make("Reacher-v4", render_mode=None)
     vec_env  = DummyVecEnv([make_env] * n_envs)
     obs            = vec_env.reset()
@@ -97,7 +98,7 @@ def collect_clips(policy, num_clips, segment_len, n_envs: int = 8):
         plt.title("Reward Distribution of Collected Clips")
         plt.xlabel("Reward")
         plt.ylabel("Frequency")
-        plt.savefig("collected_clips_reward_distribution.png") # Save the plot
+        plt.savefig(os.path.join(plot_dir, "collected_clips_reward_distribution.png")) # Save the plot
         plt.close()
 
         # Reward evolution plot
@@ -105,7 +106,7 @@ def collect_clips(policy, num_clips, segment_len, n_envs: int = 8):
         plt.title("Reward Evolution of Collected Clips")
         plt.xlabel("Clip Index")
         plt.ylabel("Reward")
-        plt.savefig("collected_clips_reward_evolution.png") # Save the plot
+        plt.savefig(os.path.join(plot_dir, "collected_clips_reward_evolution.png")) # Save the plot
         plt.close()
     else:
         print("No rewards collected to plot.")
@@ -120,14 +121,18 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 pref_ds = PreferenceDataset(device=device) # This will be initialized but not used by the new logic
 all_collected_clips_data = []
 
-# Using render_mode=None for potentially faster training if visualization during training is not critical
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+plot_dir = f"plots/run_{timestamp}/"
+os.makedirs(plot_dir, exist_ok=True)
+print(f"Plots will be saved to: {plot_dir}")
+
 print("Initializing PPO policy and environment for clip collection task...")
 raw_env_ppo = gym.make("Reacher-v4", render_mode=None)
 policy = PPO("MlpPolicy", raw_env_ppo,
              verbose=1,
-             n_steps=2048, # From original bootstrap
-             batch_size=16,  # From original bootstrap
-             tensorboard_log="./logs/ppo_reacher_clip_collection/") # New log path
+             n_steps=2048,
+             batch_size=16,
+             tensorboard_log="./logs/ppo_reacher_clip_collection/")
 
 num_collection_intervals = TOTAL_TRAINING_TIMESTEPS_FOR_CLIPS // COLLECTION_INTERVAL_TIMESTEPS
 
@@ -145,7 +150,7 @@ for i in range(num_collection_intervals):
     print(f"Policy trained. Total timesteps for policy: {policy.num_timesteps}")
 
     print(f"Collecting {NUM_CLIPS_PER_COLLECTION} clips using the policy trained for {policy.num_timesteps} timesteps...")
-    clips = collect_clips(policy, NUM_CLIPS_PER_COLLECTION, SEGMENT_LEN)
+    clips = collect_clips(policy, NUM_CLIPS_PER_COLLECTION, SEGMENT_LEN, plot_dir)
     interval_clips_data = []
     for clip_idx, clip_data in enumerate(clips):
         if 'rews' in clip_data and clip_data['rews']:

@@ -3,25 +3,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import random
-import pickle # For loading clips and saving reward model
+import pickle
 from torch.utils.data import Dataset, DataLoader, random_split
 from tqdm import tqdm
 import os
-
+from reward_model import RewardModel
+from datetime import datetime
 
 INPUT_CLIPS_PATH = "collected_clips_with_rewards.pkl"
-NUM_PREFERENCE_PAIRS = 25000  # Number of preference pairs to generate
-MIN_REWARD_DIFFERENCE_FOR_PREFERENCE = 0.1 # Minimum reward gap between two clips to form a preference
-RM_OBS_DIM = None # To be inferred from data
-RM_ACT_DIM = None # To be inferred from data
+NUM_PREFERENCE_PAIRS = 750_000  # Number of preference pairs to generate
+MIN_REWARD_DIFFERENCE_FOR_PREFERENCE = 0 # Minimum reward gap between two clips to form a preference
+RM_OBS_DIM = None
+RM_ACT_DIM = None
 RM_BATCH_SIZE = 64
-RM_EPOCHS = 1000
-RM_LEARNING_RATE = 6e-4 # Learning rate for reward model optimizer
+RM_EPOCHS = 100
+RM_LEARNING_RATE = 1e-3 # Learning rate for reward model optimizer
 RM_VALIDATION_SPLIT = 0.1 # Fraction of data to use for validation
 RM_EARLY_STOPPING_PATIENCE = 25 # Epochs to wait for improvement before early stopping
-REWARD_MODEL_SAVE_PATH = "trained_reward_model.pth" # Path to save the trained reward model
+REWARD_MODEL_SAVE_PATH = "trained_reward_model" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".pth"
 
-# --- PreferenceDataset Class ---
+
 class PreferenceDataset(Dataset):
     """
     Stores preference-labeled clip pairs as tensors, converting each clip only once on addition.
@@ -53,29 +54,28 @@ class PreferenceDataset(Dataset):
     def __getitem__(self, idx):
         return self.s1[idx], self.a1[idx], self.s2[idx], self.a2[idx], self.prefs[idx]
 
-# --- RewardModel Class ---
-class RewardModel(nn.Module):
-    def __init__(self, obs_dim, act_dim, hidden=None): # hidden parameter is not used in this specific architecture
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim + act_dim, 32), nn.ReLU(),
-            nn.Linear(32, 16), nn.ReLU(),
-            nn.Linear(16, 1)
-        )
+# # --- RewardModel Class ---
+# class RewardModel(nn.Module):
+#     def __init__(self, obs_dim, act_dim, hidden=None): # hidden parameter is not used in this specific architecture
+#         super().__init__()
+#         self.net = nn.Sequential(
+#             nn.Linear(obs_dim + act_dim, 128), nn.ReLU(),
+#             nn.Linear(128, 64), nn.ReLU(),
+#             nn.Linear(64, 1)
+#         )
 
-    def forward(self, states, actions):
-        x = torch.cat([states, actions], dim=-1)
-        return self.net(x).squeeze(-1)
+#     def forward(self, states, actions):
+#         x = torch.cat([states, actions], dim=-1)
+#         return self.net(x).squeeze(-1)
 
-    def predict_reward(self, obs, action):
-        s = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
-        a = torch.tensor(action, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
-            return self.forward(s, a).item()
+#     def predict_reward(self, obs, action):
+#         s = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+#         a = torch.tensor(action, dtype=torch.float32).unsqueeze(0)
+#         with torch.no_grad():
+#             return self.forward(s, a).item()
 
-# --- Preference Generation Function ---
 def generate_preference_pairs_from_loaded_clips(
-    loaded_clips_data, # List of dicts: {'observations': np.array, 'actions': np.array, 'reward': float}
+    loaded_clips_data, 
     num_pairs_to_generate=NUM_PREFERENCE_PAIRS,
     min_reward_gap=MIN_REWARD_DIFFERENCE_FOR_PREFERENCE
 ):
@@ -142,7 +142,6 @@ def train_reward_model_batched(
 
     print(f"\nStarting reward model training for {epochs} epochs...")
     for epoch in range(1, epochs + 1):
-        # --- Training Phase ---
         rm_model.train()
         current_train_losses = []
         current_train_accuracies = []
@@ -216,12 +215,10 @@ def train_reward_model_batched(
     rm_model.to('cpu')
     return rm_model
 
-# --- Main Script Execution ---
 if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
 
-    # 1. Load pre-collected clips data
     print(f"Loading collected clips from: {INPUT_CLIPS_PATH}")
     if not os.path.exists(INPUT_CLIPS_PATH):
         print(f"Error: Clips file not found at '{INPUT_CLIPS_PATH}'.")
@@ -235,7 +232,6 @@ if __name__ == "__main__":
         print("Error: No clips data found in the file or data is not in expected list format.")
         exit(1)
     
-    # Filter out clips that might have missing 'observations', 'actions', or 'reward'
     valid_clips_for_preferences = []
     for i, clip_data in enumerate(all_loaded_clips):
         if isinstance(clip_data, dict) and \
@@ -244,7 +240,7 @@ if __name__ == "__main__":
            'reward' in clip_data and clip_data['reward'] is not None:
             if clip_data['observations'].ndim == 2 and clip_data['actions'].ndim == 2 and \
                clip_data['observations'].shape[0] == clip_data['actions'].shape[0] and \
-               clip_data['observations'].shape[0] > 0: # Ensure segment length > 0
+               clip_data['observations'].shape[0] > 0:
                 valid_clips_for_preferences.append(clip_data)
             else:
                 print(f"Warning: Clip at index {i} has malformed 'observations' or 'actions' (ndim, shape, or length mismatch). Skipping.")

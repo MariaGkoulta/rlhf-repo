@@ -8,6 +8,7 @@ import numpy as np
 import os
 from stable_baselines3.common.callbacks import BaseCallback
 from scipy.stats import pearsonr
+from reward_model import RewardModel
 
 
 class TrueRewardCallback(BaseCallback):
@@ -53,25 +54,6 @@ class TrueRewardCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         return True
-
-class RewardModel(nn.Module):
-    def __init__(self, obs_dim, act_dim, hidden=None): # hidden parameter is not used in this specific architecture
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim + act_dim, 32), nn.ReLU(),
-            nn.Linear(32, 16), nn.ReLU(),
-            nn.Linear(16, 1)
-        )
-
-    def forward(self, states, actions):
-        x = torch.cat([states, actions], dim=-1)
-        return self.net(x).squeeze(-1)
-
-    def predict_reward(self, obs, action):
-        s = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
-        a = torch.tensor(action, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
-            return self.forward(s, a).item()
 
 class LearnedRewardEnv(gym.Wrapper):
     """Gymnasium new API:
@@ -121,7 +103,8 @@ def make_wrapped_env(reward_model_to_wrap, render_mode="rgb_array", env_id="Reac
 raw_env = gym.make("Reacher-v4", render_mode="rgb_array")
 policy  = PPO("MlpPolicy", raw_env, 
               verbose=1, n_steps=2048, batch_size=16, tensorboard_log="./logs/ppo_reacher/")
-policy.learn(total_timesteps=100_000)
+policy.learn(total_timesteps=50_000)
+policy.save("ppo_reacher_initial")
 raw_env.close()
 
 temp_env = gym.make("Reacher-v4")
@@ -130,7 +113,7 @@ action_dim = temp_env.action_space.shape[0]
 temp_env.close()
 
 loaded_reward_model = RewardModel(obs_dim, action_dim)
-reward_model_path = 'trained_reward_model.pth'
+reward_model_path = 'trained_reward_model_1505.pth'
 try:
     state_dict = torch.load(reward_model_path, map_location=torch.device('cpu')) # Load to CPU first
     loaded_reward_model.load_state_dict(state_dict)
