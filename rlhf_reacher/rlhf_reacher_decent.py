@@ -26,14 +26,15 @@ results_dir = f"results_{timestamp}"
 os.makedirs(results_dir, exist_ok=True)
 print(f"Results will be saved in: {results_dir}")
 
-TOTAL_ITERS        = 10
-CLIPS_PER_UPDATE   = 100_000
-NUM_PAIRS          = 50_000
+TOTAL_ITERS        = 4
+CLIPS_PER_UPDATE   = 50_000
+NUM_PAIRS          = 20_000
 SEGMENT_LEN        = 50
 INITIAL_CLIPS_SIZE = 100_000
 INITIAL_PREF_DS_SIZE = 50_000
 TIMESTEPS_PER_ITER = 100000
 INITIAL_POLICY_TIMESTEPS = 50_000
+MIN_GAP = 2
 
 class TrueRewardCallback(BaseCallback):
     """
@@ -265,12 +266,12 @@ def train_reward_model_batched(
     return rm
 
 
-def annotate_preferences_old(
+def annotate_preferences_new(
     clips,
     num_pairs=NUM_PAIRS,
-    min_gap=0,
-    top_frac=0.75,
-    half_frac=0.5
+    min_gap=2,
+    top_frac=0.5,
+    half_frac=0.2
 ):
     returns = np.array([sum(c["rews"]) for c in clips])
     thresh = np.percentile(returns, top_frac * 100)
@@ -354,7 +355,7 @@ def collect_clips(policy, num_clips, segment_len, n_envs: int = 8):
 def clip_return(c):
     return sum(c["rews"])
 
-def annotate_preferences(clips, num_pairs=NUM_PAIRS, min_gap=2.0):
+def annotate_preferences(clips, num_pairs=NUM_PAIRS, min_gap=MIN_GAP):
     prefs = []
     reward_differences = []
     for _ in tqdm(range(num_pairs)):
@@ -466,12 +467,23 @@ for iteration in range(1, TOTAL_ITERS):
             sub.reward_model = reward_model
     policy.set_env(vec_env)
 
+    # save policy for this iteration
+    policy_path = os.path.join(results_dir, f"ppo_reacher_iter_{iteration}.zip")
+    policy.save(policy_path)
+    print(f"Policy saved to {policy_path}")
+
+    # save reward model for this iteration
+    reward_model_path = os.path.join(results_dir, f"reward_model_iter_{iteration}.pth")
+    torch.save(reward_model.state_dict(), reward_model_path)
+    print(f"Reward model saved to {reward_model_path}")
+
+
 # save reward model
 reward_model_path = "reward_model_1905.pth"
 torch.save(reward_model.state_dict(), reward_model_path)
 print(f"Reward model saved to {reward_model_path}")
 
-policy.save("ppo_reacher_1905")
+policy.save("ppo_reacher" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + ".zip")
 
 # ── Save the final model and evaluate it ─────────────────────────────────
 print("Evaluating final policy and recording video...")
