@@ -27,8 +27,8 @@ os.makedirs(results_dir, exist_ok=True)
 print(f"Results will be saved in: {results_dir}")
 
 TOTAL_ITERS        = 10
-CLIPS_PER_UPDATE   = 50000
-NUM_PAIRS          = 20000
+CLIPS_PER_UPDATE   = 100_000
+NUM_PAIRS          = 50_000
 SEGMENT_LEN        = 50
 INITIAL_CLIPS_SIZE = 100_000
 INITIAL_PREF_DS_SIZE = 50_000
@@ -263,6 +263,48 @@ def train_reward_model_batched(
 
     rm.to('cpu')
     return rm
+
+
+def annotate_preferences_old(
+    clips,
+    num_pairs=NUM_PAIRS,
+    min_gap=0,
+    top_frac=0.75,
+    half_frac=0.5
+):
+    returns = np.array([sum(c["rews"]) for c in clips])
+    thresh = np.percentile(returns, top_frac * 100)
+    top_clips = [c for c, r in zip(clips, returns) if r >= thresh]
+    
+    prefs = []
+    diffs = []
+    
+    n_top_pairs = int(num_pairs * half_frac)
+    n_rand_pairs = num_pairs - n_top_pairs
+    
+    for _ in range(n_top_pairs):
+        if len(top_clips) < 2:
+            break
+        c1, c2 = random.sample(top_clips, 2)
+        r1, r2 = sum(c1["rews"]), sum(c2["rews"])
+        if abs(r1 - r2) < min_gap:
+            continue
+        prefs.append((c1, c2, 1 if r1 > r2 else 0))
+        diffs.append(abs(r1 - r2))
+    
+    for _ in range(n_rand_pairs):
+        c1, c2 = random.sample(clips, 2)
+        r1, r2 = sum(c1["rews"]), sum(c2["rews"])
+        if abs(r1 - r2) < min_gap:
+            continue
+        prefs.append((c1, c2, 1 if r1 > r2 else 0))
+        diffs.append(abs(r1 - r2))
+    
+    combined = list(zip(prefs, diffs))
+    random.shuffle(combined)
+    prefs, diffs = zip(*combined)
+    
+    return list(prefs), list(diffs)
 
 def collect_clips(policy, num_clips, segment_len, n_envs: int = 8):
     make_env = lambda: gym.make("Reacher-v4", render_mode=None)
