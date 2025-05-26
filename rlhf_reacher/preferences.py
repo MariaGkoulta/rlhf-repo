@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 NUM_PAIRS = 20_000
 MIN_GAP = 2
 DEFAULT_SAMPLES_PER_OTHER_BIN = 1000
-LOWER_BIN = -23
+LOWER_BIN = -20
 UPPER_BIN = 0
 
 class PreferenceDataset(Dataset):
@@ -43,51 +43,6 @@ class PreferenceDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.s1[idx], self.a1[idx], self.s2[idx], self.a2[idx], self.prefs[idx]
-    
-
-def annotate_preferences_new(
-    clips,
-    num_pairs=NUM_PAIRS,
-    min_gap=2,
-    top_frac=0.75,
-    half_frac=0.3
-):
-    returns = np.array([sum(c["rews"]) for c in clips])
-    thresh = np.percentile(returns, top_frac * 100)
-    top_clips = [c for c, r in zip(clips, returns) if r >= thresh]
-    
-    prefs = []
-    diffs = []
-    rewards = []
-    
-    n_top_pairs = int(num_pairs * half_frac)
-    n_rand_pairs = num_pairs - n_top_pairs
-    
-    for _ in range(n_top_pairs):
-        if len(top_clips) < 2:
-            break
-        c1, c2 = random.sample(top_clips, 2)
-        r1, r2 = sum(c1["rews"]), sum(c2["rews"])
-        if abs(r1 - r2) < min_gap:
-            continue
-        prefs.append((c1, c2, 1 if r1 > r2 else 0))
-        diffs.append(abs(r1 - r2))
-        rewards.append((r1, r2))
-    
-    for _ in range(n_rand_pairs):
-        c1, c2 = random.sample(clips, 2)
-        r1, r2 = sum(c1["rews"]), sum(c2["rews"])
-        if abs(r1 - r2) < min_gap:
-            continue
-        prefs.append((c1, c2, 1 if r1 > r2 else 0))
-        diffs.append(abs(r1 - r2))
-        rewards.append((r1, r2))
-
-    combined = list(zip(prefs, diffs, rewards))
-    random.shuffle(combined)
-    prefs, diffs, rewards = zip(*combined)
-
-    return list(prefs), list(diffs), list(rewards)
 
 
 def annotate_preferences(clips, num_pairs=NUM_PAIRS, min_gap=MIN_GAP):
@@ -174,12 +129,30 @@ def create_preferences(bins, num_samples_per_other_bin=DEFAULT_SAMPLES_PER_OTHER
                 r1 = clip_return(clip1)
                 r2 = clip_return(clip2)
                 difference = abs(r1 - r2)
-                # if difference < min_gap:
-                #     continue
+                if difference < min_gap:
+                    continue
                 preference_label = 1 if r1 > r2 else 0
                 prefs.append((clip1, clip2, preference_label))
                 reward_differences.append(difference)
                 generated_rewards.append((r1, r2))
 
     return prefs, reward_differences, generated_rewards
+
+
+def annotate_given_pairs(pairs_to_annotate, min_gap=MIN_GAP):
+    print(f"Number of pairs to annotate: {len(pairs_to_annotate)}")
+    prefs = []
+    reward_differences = []
+    rewards_log = []
+    print(f"Annotating {len(pairs_to_annotate)} BALD selected pairs...")
+    for c1, c2 in tqdm(pairs_to_annotate, desc="Annotating selected pairs"):
+        r1, r2 = clip_return(c1), clip_return(c2)
+        difference = abs(r1 - r2)
+        if difference < min_gap:
+            continue
+        prefs.append((c1, c2, 1 if r1 > r2 else 0))
+        reward_differences.append(difference)
+        rewards_log.append((r1, r2))
+    print(f"Annotated {len(prefs)} pairs with preferences.")
+    return prefs, reward_differences, rewards_log
         
