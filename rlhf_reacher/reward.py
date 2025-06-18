@@ -1,15 +1,18 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
+# import leaky relu
+import torch.nn.functional as F
 
 class RewardModel(nn.Module):
-    def __init__(self, obs_dim, act_dim, hidden=None):
+    def __init__(self, obs_dim, act_dim, dropout_prob=0.1, hidden=None):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(obs_dim + act_dim, 64), nn.ReLU(),
-            nn.Linear(64, 32), nn.ReLU(),
-            nn.Linear(32, 1)
+            nn.Linear(obs_dim + act_dim, 64), nn.LeakyReLU(),
+            nn.Dropout(dropout_prob),
+            nn.Linear(64, 64), nn.LeakyReLU(),
+            nn.Dropout(dropout_prob),
+            nn.Linear(64, 1)
         )
 
     def forward(self, states, actions):

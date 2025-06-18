@@ -6,13 +6,14 @@ import random
 from tqdm import tqdm
 from collections import defaultdict
 import matplotlib.pyplot as plt
+from plots import plot_bins
 
-
-NUM_PAIRS = 20_000
+NUM_PAIRS = 2000
 MIN_GAP = 2
-DEFAULT_SAMPLES_PER_OTHER_BIN = 1000
-LOWER_BIN = -20
+DEFAULT_SAMPLES_PER_OTHER_BIN = 20
+LOWER_BIN = -60
 UPPER_BIN = 0
+KEEP_PREF_FRACTION = 1.0 # Fraction of preferences to keep when adding new ones
 
 class PreferenceDataset(Dataset):
     """
@@ -27,6 +28,16 @@ class PreferenceDataset(Dataset):
         self.device = device
 
     def add(self, clip1, clip2, pref):
+
+        if KEEP_PREF_FRACTION < 1.0 and len(self.prefs) > 0:
+            keep_n = int(len(self.prefs) * KEEP_PREF_FRACTION)
+            idxs = random.sample(range(len(self.prefs)), keep_n)
+            self.s1    = [self.s1[i]    for i in idxs]
+            self.a1    = [self.a1[i]    for i in idxs]
+            self.s2    = [self.s2[i]    for i in idxs]
+            self.a2    = [self.a2[i]    for i in idxs]
+            self.prefs = [self.prefs[i] for i in idxs]
+
         s1 = torch.tensor(np.stack(clip1['obs']), dtype=torch.float32, device=self.device)
         a1 = torch.tensor(np.stack(clip1['acts']), dtype=torch.float32, device=self.device)
         s2 = torch.tensor(np.stack(clip2['obs']), dtype=torch.float32, device=self.device)
@@ -43,7 +54,6 @@ class PreferenceDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.s1[idx], self.a1[idx], self.s2[idx], self.a2[idx], self.prefs[idx]
-
 
 def annotate_preferences(clips, num_pairs=NUM_PAIRS, min_gap=MIN_GAP):
     prefs = []
@@ -75,35 +85,6 @@ def create_bins(bins, clips, results_dir=None, iteration=0, num_bins=10):
         bins_to_fill[bin_idx].append(clip)
     plot_bins(bins_to_fill, bin_edges, results_dir=results_dir, iteration=iteration)
     return bins_to_fill
-
-def plot_bins(bins, bin_edges, results_dir=None, iteration=0):
-    sorted_bin_indices = sorted(bins.keys())
-    clip_counts = [len(bins[idx]) for idx in sorted_bin_indices]
-    tick_labels = []
-    num_defined_bins = len(bin_edges) - 1
-    for idx in sorted_bin_indices:
-        if idx == -1:
-            label = "< {:.2f}".format(bin_edges[0])
-        elif idx == num_defined_bins:
-            label = ">= {:.2f}".format(bin_edges[-1])
-        elif 0 <= idx < num_defined_bins:
-            label = "[{:.2f}, {:.2f})".format(bin_edges[idx], bin_edges[idx+1])
-        else:
-            label = f"Bin {idx}" 
-        tick_labels.append(label)
-    x_positions = np.arange(len(sorted_bin_indices))
-    plt.figure(figsize=(max(10, len(tick_labels) * 0.8), 6))
-    plt.bar(x_positions, clip_counts, width=0.5, align='center')
-    plt.xlabel('Clip Reward Range')
-    plt.ylabel('Number of Clips')
-    plt.title(f'Number of Clips in Each Bin (Iteration {iteration})')
-    plt.xticks(x_positions, tick_labels, rotation=45, ha="right")
-    plt.tight_layout()
-    if results_dir:
-        plt.savefig(f"{results_dir}/bins_{iteration}.png")
-    else:
-        plt.show()
-    plt.close()
 
 def create_preferences(bins, num_samples_per_other_bin=DEFAULT_SAMPLES_PER_OTHER_BIN, min_gap=MIN_GAP):
     """
@@ -144,7 +125,7 @@ def annotate_given_pairs(pairs_to_annotate, min_gap=MIN_GAP):
     prefs = []
     reward_differences = []
     rewards_log = []
-    print(f"Annotating {len(pairs_to_annotate)} BALD selected pairs...")
+    print(f"Annotating {len(pairs_to_annotate)} selected pairs...")
     for c1, c2 in tqdm(pairs_to_annotate, desc="Annotating selected pairs"):
         r1, r2 = clip_return(c1), clip_return(c2)
         difference = abs(r1 - r2)
@@ -153,6 +134,5 @@ def annotate_given_pairs(pairs_to_annotate, min_gap=MIN_GAP):
         prefs.append((c1, c2, 1 if r1 > r2 else 0))
         reward_differences.append(difference)
         rewards_log.append((r1, r2))
-    print(f"Annotated {len(prefs)} pairs with preferences.")
     return prefs, reward_differences, rewards_log
         
