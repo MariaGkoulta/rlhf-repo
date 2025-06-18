@@ -26,10 +26,11 @@ from preferences import (
     create_bins, create_preferences, annotate_given_pairs
 )
 from reward import RewardModel
-from bald import select_active_pairs
-from plots import plot_correlation_by_bin, plot_rewards
+from bald import select_active_pairs, select_variance_pairs
+from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred
 
 import inspect
+from torch.utils.tensorboard import SummaryWriter
 
 class NoSeedArgumentWrapper(gym.Wrapper):
     """
@@ -89,10 +90,10 @@ class TrueRewardCallback(BaseCallback):
             self.logger.record("rollout/pearson_r_true_vs_learned", np.nan)
             self.logger.record("rollout/pearson_p_value", np.nan)
 
-        for subenv in self.training_env.envs:
-            if hasattr(subenv, "ep_true"):
-                subenv.ep_true.clear()
-                subenv.ep_learned.clear()
+        # for subenv in self.training_env.envs:
+        #     if hasattr(subenv, "ep_true"):
+        #         subenv.ep_true.clear()
+        #         subenv.ep_learned.clear()
 
     def _on_step(self) -> bool:
         return True
@@ -114,6 +115,14 @@ class LearnedRewardEnv(gym.Wrapper):
         self.raw_learned_r_M2 = 0.0 # M2 is the sum of squares of differences from the current mean
         self.reward_norm_epsilon = 1e-8 # Epsilon for reward normalization stddev
         self.normalize_rewards = normalize_rewards # Flag to enable/disable reward normalization
+
+    def get_and_clear_episode_rewards(self):
+        """Returns the collected episode rewards and clears the internal lists."""
+        true = self.ep_true
+        learned = self.ep_learned
+        self.ep_true = []
+        self.ep_learned = []
+        return true, learned
 
     def _update_running_stats(self, raw_value: float): # Takes raw value from reward model
         self.raw_learned_r_count += 1
@@ -170,8 +179,8 @@ class LearnedRewardEnv(gym.Wrapper):
         return obs, reward_for_ppo, terminated, truncated, info
 
 def train_reward_model_batched(
-    rm, pref_dataset, batch_size=64, epochs=20, lr=1e-3,
-    val_frac=0.1, patience=10, device='cpu', regularization_weight=1e-3, 
+    rm, pref_dataset, batch_size=64, epochs=20,
+    val_frac=0.1, patience=10, optimizer=None, device='cpu', regularization_weight=1e-4, 
     logger=None, iteration=0
 ):
     rm.to(device)
@@ -182,7 +191,6 @@ def train_reward_model_batched(
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
 
-    optimizer = torch.optim.Adam(rm.parameters(), lr=lr, weight_decay=1e-4)
     best_val_loss = float('inf')
     no_improve = 0
 
@@ -339,19 +347,19 @@ def sample_random_preferences(clips, num_samples, min_gap):
         if abs(sum(c1["rews"]) - sum(c2["rews"])) >= min_gap:
             cand_pairs.append((c1, c2))
     prefs, _, _ = annotate_given_pairs(cand_pairs, min_gap=min_gap)
-    return prefs
+    return prefs    
 
 def main():
     TOTAL_ITERS        = 50
     INITIAL_POLICY_TS  = 1
 
     USE_BINNING        = False  # Set to False to use random sampling instead
-    NORMALIZE_REWARDS = False
+    NORMALIZE_REWARDS = True
 
     EXTRACT_SEGMENTS = True  # If True, segments are extracted from clips
     SEGMENT_LEN       = 30  # Length of segments to extract from clips
     NUM_EPISODES_TO_COLLECT_INITIAL = 200 # Number of full episodes to collect initially.
-    NUM_EPISODES_TO_COLLECT_PER_UPDATE = 50  # Number of full episodes to collect in each iteration.
+    NUM_EPISODES_TO_COLLECT_PER_UPDATE = 200  # Number of full episodes to collect in each iteration.
     # Only used if EXTRACT_SEGMENTS is True:
     TARGET_NUM_SEGMENTS_IF_EXTRACTING_INITIAL = 1000 # Target number of segments to sample from initial episodes.
     TARGET_NUM_SEGMENTS_IF_EXTRACTING_PER_UPDATE = 200
@@ -368,7 +376,7 @@ def main():
     REGULARIZATION_WEIGHT = 1e-5
     ENT_COEF           = 0.01  # Entropy coefficient for PPO
 
-    TOTAL_TARGET_PAIRS = 5000
+    TOTAL_TARGET_PAIRS = 7000
     INITIAL_COLLECTION_FRACTION = 0.25
     PPO_TIMESTEPS_PER_ITER = 20000  # Train policy more often with fewer steps
     REFERENCE_TIMESTEPS_FOR_RATE = 5e6
@@ -379,6 +387,8 @@ def main():
     TOTAL_PPO_TIMESTEPS = 10e6
 
     MAX_EPISODE_STEPS = 50
+    OPTIMIZER_LR = 1e-3
+    OPTIMIZER_WD = 1e-4
 
     env_id = "Reacher-v4"
 
@@ -396,6 +406,9 @@ def main():
     results_dir = f"results_{timestamp}"
     os.makedirs(results_dir, exist_ok=True)
     print(f"Results will be saved in: {results_dir}")
+
+    tensorboard_log_dir = f"./logs/ppo_{env_id}/"
+    writer = SummaryWriter(log_dir=tensorboard_log_dir)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     pref_ds = PreferenceDataset(device=device)
@@ -427,7 +440,7 @@ def main():
     print(f"Initial preference generation with MIN_GAP: {current_min_gap}")
 
     clip_rewards = [clip_return(c) for c in clips_ds]
-    plot_rewards(clip_rewards, results_dir, it=0)
+    plot_rewards(clip_rewards, results_dir, it=0, writer=writer)
 
     bins = None
     if USE_BINNING:
@@ -468,8 +481,9 @@ def main():
     act_dim = policy.action_space.shape[0]
     reward_logger_iteration = 0
     reward_model = RewardModel(obs_dim, act_dim)
+    optimizer = torch.optim.Adam(reward_model.parameters(), lr=OPTIMIZER_LR, weight_decay=OPTIMIZER_WD)
     reward_model, reward_logger_iteration = train_reward_model_batched(
-        reward_model, pref_ds, device=device, epochs=50, patience=10,
+        reward_model, pref_ds, device=device, epochs=50, patience=10, optimizer=optimizer,
         regularization_weight=REGULARIZATION_WEIGHT, logger=policy.logger, iteration=reward_logger_iteration
     )
 
@@ -516,11 +530,19 @@ def main():
         )
         clips_ds.extend(new_segments)
 
+        all_results = vec_env.env_method("get_and_clear_episode_rewards")
+        true_rewards = [r for res in all_results for r in res[0]]
+        pred_rewards = [r for res in all_results for r in res[1]]
+        if true_rewards and pred_rewards:
+            plot_true_vs_pred(true_rewards, pred_rewards, results_dir, it, writer=writer)
+        else:
+            print(f"Iteration {it}: Not enough true/predicted rewards to plot true vs pred.")
+
         if USE_BINNING:
             bins = create_bins(bins, clips_ds, results_dir, it, NUM_BINS)
 
         segment_rewards_for_plot = [clip_return(c) for c in new_segments]
-        plot_rewards(segment_rewards_for_plot, results_dir, it)
+        plot_rewards(segment_rewards_for_plot, results_dir, it, writer=writer)
 
         rate_scaling_factor = REFERENCE_TIMESTEPS_FOR_RATE / (T_cumulative_ppo_steps_in_loop + REFERENCE_TIMESTEPS_FOR_RATE)
         _target_pairs_for_iter = round(BASE_PAIRS_PER_ITERATION_SCALER * rate_scaling_factor)
@@ -549,8 +571,27 @@ def main():
                                 min_gap=current_min_gap
                             )
                 else:
+                    print(it)
                     num_rand_iter_loop = target_pairs_this_iter
-                    new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop, current_min_gap)
+                    if T_cumulative_ppo_steps_in_loop < 300_000:
+                        new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop, current_min_gap)
+                    else:
+                        print(f"Using BALD...")
+                        effective_bald_k = min(BALD_K, num_rand_iter_loop)
+                        cand_pairs = []
+                        if clips_ds:
+                            cand_pairs = select_variance_pairs(
+                                clips_ds, reward_model,
+                                pool_size=num_rand_iter_loop,
+                                K=effective_bald_k, T=BALD_T,
+                                device=device
+                            )
+                        if cand_pairs:
+                            _annotated_prefs, _, _ = annotate_given_pairs(cand_pairs, min_gap=current_min_gap)
+                            new_prefs = _annotated_prefs
+                            print(f"Iteration {it}: BALD targeted {target_pairs_this_iter} (effective K {effective_bald_k}), selected {len(new_prefs)} pairs.")
+                        
+
                 print(f"Iteration {it}: Targeted {target_pairs_this_iter} random pairs, sampled {len(new_prefs)}.")
             else:
                 pool = BALD_POOL_SIZE // 2
@@ -577,7 +618,7 @@ def main():
 
         reward_model, reward_logger_iteration = train_reward_model_batched(
             reward_model, pref_ds, device=device,
-            epochs=50, patience=7, lr=5e-4,
+            epochs=50, patience=7, optimizer=optimizer,
             regularization_weight=REGULARIZATION_WEIGHT,
             logger=policy.logger, iteration=reward_logger_iteration
         )
@@ -585,7 +626,7 @@ def main():
             sub.reward_model = reward_model
 
         if clips_ds:
-            plot_correlation_by_bin(clips_ds, reward_model, it, results_dir)
+            plot_correlation_by_bin(clips_ds, reward_model, it, results_dir, writer=writer)
         else:
             print(f"Iteration {it}: No clips available to generate correlation plot.")
 
