@@ -14,115 +14,46 @@ from stable_baselines3.common.vec_env import VecMonitor
 from gymnasium.wrappers import TimeLimit
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
+
+# Custom code
 from preferences import (
     PreferenceDataset, annotate_preferences, clip_return,
     create_bins, create_preferences, annotate_given_pairs
 )
+from utils import TrueRewardCallback, NoSeedArgumentWrapper
 from reward import RewardModel
-from bald import select_active_pairs, select_variance_pairs
-from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred
-
-from torch.utils.tensorboard import SummaryWriter
-
-
-class LearnedRewardEnv(gym.Wrapper):
-    def __init__(self, env, reward_model, normalize_rewards=True):
-        super().__init__(env)
-        self.reward_model = reward_model
-        self.prev_obs = None 
-        self._true_sum = 0.0
-        self._learned_sum = 0.0 
-        self.ep_true = []
-        self.ep_learned = []
-
-        # Variables for running normalization of raw learned rewards
-        self.raw_learned_r_count = 0
-        self.raw_learned_r_mean = 0.0
-        self.raw_learned_r_M2 = 0.0 # M2 is the sum of squares of differences from the current mean
-        self.reward_norm_epsilon = 1e-8 # Epsilon for reward normalization stddev
-        self.normalize_rewards = normalize_rewards # Flag to enable/disable reward normalization
-
-    def get_and_clear_episode_rewards(self):
-        """Returns the collected episode rewards and clears the internal lists."""
-        true = self.ep_true
-        learned = self.ep_learned
-        self.ep_true = []
-        self.ep_learned = []
-        return true, learned
-
-    def _update_running_stats(self, raw_value: float): # Takes raw value from reward model
-        self.raw_learned_r_count += 1
-        delta = raw_value - self.raw_learned_r_mean
-        self.raw_learned_r_mean += delta / self.raw_learned_r_count
-        delta2 = raw_value - self.raw_learned_r_mean 
-        self.raw_learned_r_M2 += delta * delta2
-    
-    def _get_running_std(self) -> float:
-        """Calculates running standard deviation."""
-        if self.raw_learned_r_count < 2:
-            return 0.0 
-        variance = self.raw_learned_r_M2 / self.raw_learned_r_count # This is population variance if count is N, sample if N-1
-        return np.sqrt(variance)
-
-    def reset(self, **kwargs):
-        obs, info = super().reset(**kwargs)
-        self.prev_obs = obs
-        self._true_sum = 0.0
-        self._learned_sum = 0.0
-        return obs, info
-
-    def step(self, action):
-        obs, true_r, terminated, truncated, info = super().step(action)
-        learned_r_raw = self.reward_model.predict_reward(self.prev_obs, action)
-
-        self._true_sum += true_r
-        
-        reward_for_ppo = learned_r_raw 
-
-        if self.normalize_rewards:
-            self._update_running_stats(learned_r_raw)
-            current_std = self._get_running_std()
-            if current_std > self.reward_norm_epsilon:
-                normalized_learned_r = (learned_r_raw - self.raw_learned_r_mean) / current_std
-            else:
-                normalized_learned_r = learned_r_raw - self.raw_learned_r_mean
-            reward_for_ppo = normalized_learned_r
-        
-        self._learned_sum += reward_for_ppo 
-
-        done = terminated or truncated
-        
-        if done:
-            info = info.copy()
-            info["episode"] = {
-                "r_true": self._true_sum,
-                "r_learned": self._learned_sum
-            }
-            self.ep_true.append(self._true_sum)
-            self.ep_learned.append(self._learned_sum)
-
-        self.prev_obs = obs
-        return obs, reward_for_ppo, terminated, truncated, info
+from bald import select_active_pairs
+from plots import plot_correlation_by_bin, plot_rewards
+from custom_env import LearnedRewardEnv
 
 def train_reward_model_batched(
-    rm, pref_dataset, batch_size=64, epochs=20,
-    val_frac=0.1, patience=10, optimizer=None, device='cpu', regularization_weight=1e-4, 
-    logger=None, iteration=0
+    reward_model,
+    pref_dataset,
+    batch_size=64,
+    epochs=20,
+    val_frac=0.1,
+    patience=10,
+    optimizer=None,
+    device='cpu',
+    regularization_weight=1e-4, 
+    logger=None,
+    iteration=0
 ):
-    rm.to(device)
+    reward_model.to(device)
     total = len(pref_dataset)
     val_size = int(total * val_frac)
     train_size = total - val_size
-    train_ds, val_ds = random_split(pref_dataset, [train_size, val_size])
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
+    train_data, val_data = random_split(pref_dataset, [train_size, val_size])
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
 
     best_val_loss = float('inf')
     no_improve = 0
 
     for epoch in range(1, epochs+1):
         iteration += 1
-        rm.train()
+        reward_model.train()
         train_losses, train_accs = [], []
         for s1, a1, s2, a2, prefs in train_loader:
             N, T, obs_dim = s1.shape
@@ -133,8 +64,8 @@ def train_reward_model_batched(
             s2f = s2.view(N*T, obs_dim)
             a2f = a2.view(N*T, act_dim)
 
-            r1 = rm(s1f, a1f).view(N, T).sum(1)
-            r2 = rm(s2f, a2f).view(N, T).sum(1)
+            r1 = reward_model(s1f, a1f).view(N, T).sum(1)
+            r2 = reward_model(s2f, a2f).view(N, T).sum(1)
             logits = r1 - r2
 
             loss = F.binary_cross_entropy_with_logits(logits, prefs)
@@ -151,7 +82,7 @@ def train_reward_model_batched(
         avg_train_acc = float(np.mean(train_accs))
         print(f"Epoch {epoch} | train_loss={avg_train_loss:.4f} | train_acc={avg_train_acc:.4f}", end=" | ")
 
-        rm.train()
+        reward_model.train()
         val_losses, val_accs = [], []
         with torch.no_grad():
             for s1, a1, s2, a2, prefs in val_loader:
@@ -161,8 +92,8 @@ def train_reward_model_batched(
                 s2f = s2.view(N*T, obs_dim)
                 a2f = a2.view(N*T, a2.shape[2])
 
-                r1 = rm(s1f, a1f).view(N, T).sum(1)
-                r2 = rm(s2f, a2f).view(N, T).sum(1)
+                r1 = reward_model(s1f, a1f).view(N, T).sum(1)
+                r2 = reward_model(s2f, a2f).view(N, T).sum(1)
                 logits = r1 - r2
 
                 vloss = F.binary_cross_entropy_with_logits(logits, prefs)
@@ -187,9 +118,9 @@ def train_reward_model_batched(
             if no_improve >= patience:
                 print(f"Early stopping at epoch {epoch}")
                 break
-    rm.eval()
-    rm.to('cpu')
-    return rm, iteration
+    reward_model.eval()
+    reward_model.to('cpu')
+    return reward_model, iteration
 
 def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50): # Renamed num_clips to num_episodes_to_collect
     def make_env(): return gym.make(env_id, render_mode=None, max_episode_steps=max_episode_steps)
