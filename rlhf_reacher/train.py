@@ -2,11 +2,8 @@ import argparse
 import os
 import datetime
 import random
-import math
 import gymnasium as gym
-import numpy as np
 import torch
-import torch.nn.functional as F
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
@@ -42,7 +39,6 @@ NUM_BINS = 120
 BALD_POOL_SIZE = 50000
 BALD_K = 10000
 BALD_T = 10
-ENT_COEF = 0.01  # Entropy coefficient for PPO
 TOTAL_TARGET_PAIRS = 7000
 INITIAL_COLLECTION_FRACTION = 0.25
 PPO_TIMESTEPS_PER_ITER = 20000  # Train policy more often with fewer steps
@@ -52,6 +48,12 @@ REFERENCE_TIMESTEPS_FOR_RATE = 5e6
 BASE_PAIRS_PER_ITERATION_SCALER = 50
 TOTAL_PPO_TIMESTEPS = 10e6
 MAX_EPISODE_STEPS = 50
+
+# PPO parameters
+PPO_N_STEPS = 2048
+PPO_BATCH_SIZE = 64
+PPO_N_EPOCHS = 4
+PPO_ENT_COEF = 0.01
 
 # Optimizer parameters for reward model
 REWARD_MODEL_LEARNING_RATE = 1e-3
@@ -174,10 +176,10 @@ def main():
         "MlpPolicy",
         time_limited_raw_env,
         verbose=1,
-        n_steps=2048,
-        batch_size=64,
-        ent_coef=ENT_COEF,
-        n_epochs=4,
+        n_steps=PPO_N_STEPS,
+        batch_size=PPO_BATCH_SIZE,
+        ent_coef=PPO_ENT_COEF,
+        n_epochs=PPO_N_EPOCHS,
         tensorboard_log=f"./logs/ppo_{env_id}/"
     )
     policy.learn(total_timesteps=INITIAL_POLICY_TS)
@@ -216,7 +218,6 @@ def main():
         pref_ds.add(c1, c2, p)
 
     initial_prefs_count = len(pref_ds) # Number of pairs after initial collection
-    target_pairs_in_loop = TOTAL_TARGET_PAIRS - initial_prefs_count
 
     obs_dim = policy.observation_space.shape[0]
     act_dim = policy.action_space.shape[0]
