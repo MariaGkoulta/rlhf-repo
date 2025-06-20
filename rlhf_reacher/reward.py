@@ -35,7 +35,6 @@ def train_reward_model_batched(
     patience=10,
     optimizer=None,
     device='cpu',
-    regularization_weight=1e-4, 
     logger=None,
     iteration=0
 ):
@@ -68,7 +67,6 @@ def train_reward_model_batched(
             logits = r1 - r2
 
             loss = F.binary_cross_entropy_with_logits(logits, prefs)
-            loss += regularization_weight * (r1.pow(2).mean() + r2.pow(2).mean())
 
             optimizer.zero_grad()
             loss.backward()

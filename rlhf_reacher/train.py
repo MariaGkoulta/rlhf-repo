@@ -12,14 +12,13 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import VecMonitor
 from gymnasium.wrappers import TimeLimit
-from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
 # Custom code
 from preferences import (
-    PreferenceDataset, annotate_preferences, clip_return,
-    create_bins, create_preferences, annotate_given_pairs
+    PreferenceDataset, clip_return,
+    annotate_given_pairs
 )
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 from reward import RewardModel, train_reward_model_batched
@@ -55,8 +54,10 @@ REFERENCE_TIMESTEPS_FOR_RATE = 5e6
 BASE_PAIRS_PER_ITERATION_SCALER = 50
 TOTAL_PPO_TIMESTEPS = 10e6
 MAX_EPISODE_STEPS = 50
-OPTIMIZER_LR = 1e-3
-OPTIMIZER_WD = 1e-3
+
+# Optimizer parameters
+OPT_LEARNING_RATE = 1e-3
+OPT_WEIGHT_DECAY = 1e-2
 
 
 def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50):
@@ -216,10 +217,16 @@ def main():
     act_dim = policy.action_space.shape[0]
     reward_logger_iteration = 0
     reward_model = RewardModel(obs_dim, act_dim)
-    optimizer = torch.optim.Adam(reward_model.parameters(), lr=OPTIMIZER_LR, weight_decay=OPTIMIZER_WD)
+    optimizer = torch.optim.AdamW(reward_model.parameters(), lr=OPT_LEARNING_RATE, weight_decay=OPT_WEIGHT_DECAY)
     reward_model, reward_logger_iteration = train_reward_model_batched(
-        reward_model, pref_ds, device=device, epochs=50, patience=10, optimizer=optimizer,
-        regularization_weight=REGULARIZATION_WEIGHT, logger=policy.logger, iteration=reward_logger_iteration
+        reward_model,
+        pref_ds,
+        device=device,
+        epochs=50,
+        patience=10,
+        optimizer=optimizer,
+        logger=policy.logger,
+        iteration=reward_logger_iteration
     )
 
     def make_wrapped():
@@ -333,10 +340,14 @@ def main():
             pref_ds.add(c1, c2, p)
 
         reward_model, reward_logger_iteration = train_reward_model_batched(
-            reward_model, pref_ds, device=device,
-            epochs=50, patience=7, optimizer=optimizer,
-            regularization_weight=REGULARIZATION_WEIGHT,
-            logger=policy.logger, iteration=reward_logger_iteration
+            reward_model,
+            pref_ds,
+            device=device,
+            epochs=50,
+            patience=7,
+            optimizer=optimizer,
+            logger=policy.logger,
+            iteration=reward_logger_iteration
         )
         for sub in vec_env.envs:
             sub.reward_model = reward_model
