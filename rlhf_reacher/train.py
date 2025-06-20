@@ -29,7 +29,6 @@ from custom_env import LearnedRewardEnv
 
 TOTAL_ITERS = 50
 INITIAL_POLICY_TS = 1
-NORMALIZE_REWARDS = True
 EXTRACT_SEGMENTS = True  # If True, segments are extracted from clips
 SEGMENT_LEN = 30  # Length of segments to extract from clips
 NUM_EPISODES_TO_COLLECT_INITIAL = 200 # Number of full episodes to collect initially.
@@ -43,7 +42,6 @@ NUM_BINS = 120
 BALD_POOL_SIZE = 50000
 BALD_K = 10000
 BALD_T = 10
-REGULARIZATION_WEIGHT = 1e-2
 ENT_COEF = 0.01  # Entropy coefficient for PPO
 TOTAL_TARGET_PAIRS = 7000
 INITIAL_COLLECTION_FRACTION = 0.25
@@ -55,9 +53,9 @@ BASE_PAIRS_PER_ITERATION_SCALER = 50
 TOTAL_PPO_TIMESTEPS = 10e6
 MAX_EPISODE_STEPS = 50
 
-# Optimizer parameters
-OPT_LEARNING_RATE = 1e-3
-OPT_WEIGHT_DECAY = 1e-2
+# Optimizer parameters for reward model
+REWARD_MODEL_LEARNING_RATE = 1e-3
+REWARD_MODEL_WEIGHT_DECAY = 1e-2
 
 
 def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50):
@@ -172,9 +170,16 @@ def main():
     raw_env = gym.make(env_id, render_mode="rgb_array")
     wrapped_base_raw_env = NoSeedArgumentWrapper(raw_env)
     time_limited_raw_env = TimeLimit(wrapped_base_raw_env, max_episode_steps=MAX_EPISODE_STEPS)
-    policy = PPO("MlpPolicy", time_limited_raw_env,
-                 verbose=1, n_steps=2048, batch_size=64, ent_coef=ENT_COEF, n_epochs=10,
-                 tensorboard_log=f"./logs/ppo_{env_id}/")
+    policy = PPO(
+        "MlpPolicy",
+        time_limited_raw_env,
+        verbose=1,
+        n_steps=2048,
+        batch_size=64,
+        ent_coef=ENT_COEF,
+        n_epochs=4,
+        tensorboard_log=f"./logs/ppo_{env_id}/"
+    )
     policy.learn(total_timesteps=INITIAL_POLICY_TS)
     time_limited_raw_env.close()
 
@@ -217,7 +222,7 @@ def main():
     act_dim = policy.action_space.shape[0]
     reward_logger_iteration = 0
     reward_model = RewardModel(obs_dim, act_dim)
-    optimizer = torch.optim.AdamW(reward_model.parameters(), lr=OPT_LEARNING_RATE, weight_decay=OPT_WEIGHT_DECAY)
+    optimizer = torch.optim.AdamW(reward_model.parameters(), lr=REWARD_MODEL_LEARNING_RATE, weight_decay=REWARD_MODEL_WEIGHT_DECAY)
     reward_model, reward_logger_iteration = train_reward_model_batched(
         reward_model,
         pref_ds,
@@ -234,9 +239,10 @@ def main():
         wrapped_base_env = NoSeedArgumentWrapper(base_env)
         e_time_limited = TimeLimit(wrapped_base_env, max_episode_steps=MAX_EPISODE_STEPS)
         e_monitored = Monitor(e_time_limited)
-        return LearnedRewardEnv(e_monitored, reward_model, normalize_rewards=NORMALIZE_REWARDS)
+        return LearnedRewardEnv(e_monitored, reward_model)
 
     vec_env = DummyVecEnv([make_wrapped])
+    # VecNormalize handles both observation and reward normalization
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, gamma=policy.gamma)
     vec_env = VecMonitor(vec_env)
     policy.set_env(vec_env)

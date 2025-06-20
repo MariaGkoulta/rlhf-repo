@@ -79,7 +79,8 @@ def train_reward_model_batched(
         avg_train_acc = float(np.mean(train_accs))
         print(f"Epoch {epoch} | train_loss={avg_train_loss:.4f} | train_acc={avg_train_acc:.4f}", end=" | ")
 
-        reward_model.train()
+        # Compute validation loss and accuracy
+        reward_model.eval()
         val_losses, val_accs = [], []
         with torch.no_grad():
             for s1, a1, s2, a2, prefs in val_loader:
@@ -115,6 +116,5 @@ def train_reward_model_batched(
             if no_improve >= patience:
                 print(f"Early stopping at epoch {epoch}")
                 break
-    reward_model.eval()
     reward_model.to('cpu')
     return reward_model, iteration
