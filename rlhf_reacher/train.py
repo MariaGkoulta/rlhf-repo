@@ -24,8 +24,40 @@ from preferences import (
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 from reward import RewardModel
 from bald import select_active_pairs
-from plots import plot_correlation_by_bin, plot_rewards
+from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred
 from custom_env import LearnedRewardEnv
+
+
+TOTAL_ITERS = 50
+INITIAL_POLICY_TS = 1
+NORMALIZE_REWARDS = True
+EXTRACT_SEGMENTS = True  # If True, segments are extracted from clips
+SEGMENT_LEN = 30  # Length of segments to extract from clips
+NUM_EPISODES_TO_COLLECT_INITIAL = 200 # Number of full episodes to collect initially.
+NUM_EPISODES_TO_COLLECT_PER_UPDATE = 200  # Number of full episodes to collect in each iteration.
+# Only used if EXTRACT_SEGMENTS is True:
+TARGET_NUM_SEGMENTS_IF_EXTRACTING_INITIAL = 1000 # Target number of segments to sample from initial episodes.
+TARGET_NUM_SEGMENTS_IF_EXTRACTING_PER_UPDATE = 200
+INITIAL_MIN_GAP = 2
+FINAL_MIN_GAP = 0
+NUM_BINS = 120
+BALD_POOL_SIZE = 50000
+BALD_K = 10000
+BALD_T = 10
+REGULARIZATION_WEIGHT = 1e-2
+ENT_COEF = 0.01  # Entropy coefficient for PPO
+TOTAL_TARGET_PAIRS = 7000
+INITIAL_COLLECTION_FRACTION = 0.25
+PPO_TIMESTEPS_PER_ITER = 20000  # Train policy more often with fewer steps
+REFERENCE_TIMESTEPS_FOR_RATE = 5e6
+# Scales the number of pairs collected per iteration based on the rate.
+# If T_cumulative is 0, rate factor is 1, so this is the initial target pairs per iter in main loop.
+BASE_PAIRS_PER_ITERATION_SCALER = 50
+TOTAL_PPO_TIMESTEPS = 10e6
+MAX_EPISODE_STEPS = 50
+OPTIMIZER_LR = 1e-3
+OPTIMIZER_WD = 1e-4
+
 
 def train_reward_model_batched(
     reward_model,
@@ -122,7 +154,7 @@ def train_reward_model_batched(
     reward_model.to('cpu')
     return reward_model, iteration
 
-def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50): # Renamed num_clips to num_episodes_to_collect
+def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50):
     def make_env(): return gym.make(env_id, render_mode=None, max_episode_steps=max_episode_steps)
     vec_env = DummyVecEnv([make_env]*n_envs)
     obs = vec_env.reset()
@@ -207,45 +239,6 @@ def sample_random_preferences(clips, num_samples, min_gap):
     return prefs    
 
 def main():
-    TOTAL_ITERS        = 50
-    INITIAL_POLICY_TS  = 1
-
-    USE_BINNING        = False  # Set to False to use random sampling instead
-    NORMALIZE_REWARDS = True
-
-    EXTRACT_SEGMENTS = True  # If True, segments are extracted from clips
-    SEGMENT_LEN       = 30  # Length of segments to extract from clips
-    NUM_EPISODES_TO_COLLECT_INITIAL = 200 # Number of full episodes to collect initially.
-    NUM_EPISODES_TO_COLLECT_PER_UPDATE = 200  # Number of full episodes to collect in each iteration.
-    # Only used if EXTRACT_SEGMENTS is True:
-    TARGET_NUM_SEGMENTS_IF_EXTRACTING_INITIAL = 1000 # Target number of segments to sample from initial episodes.
-    TARGET_NUM_SEGMENTS_IF_EXTRACTING_PER_UPDATE = 200
-
-    INITIAL_MIN_GAP            = 2
-    FINAL_MIN_GAP              = 0
-
-    NUM_BINS           = 120
-
-    BALD_POOL_SIZE     = 50000
-    BALD_K             = 10000
-    BALD_T             = 10
-
-    REGULARIZATION_WEIGHT = 1e-5
-    ENT_COEF           = 0.01  # Entropy coefficient for PPO
-
-    TOTAL_TARGET_PAIRS = 7000
-    INITIAL_COLLECTION_FRACTION = 0.25
-    PPO_TIMESTEPS_PER_ITER = 20000  # Train policy more often with fewer steps
-    REFERENCE_TIMESTEPS_FOR_RATE = 5e6
-    # Scales the number of pairs collected per iteration based on the rate.
-    # If T_cumulative is 0, rate factor is 1, so this is the initial target pairs per iter in main loop.
-    BASE_PAIRS_PER_ITERATION_SCALER = 50
-
-    TOTAL_PPO_TIMESTEPS = 10e6
-
-    MAX_EPISODE_STEPS = 50
-    OPTIMIZER_LR = 1e-3
-    OPTIMIZER_WD = 1e-4
 
     env_id = "Reacher-v4"
 
@@ -260,7 +253,7 @@ def main():
     args = parser.parse_args()
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = f"results_{timestamp}"
+    results_dir = f"results/results_{timestamp}"
     os.makedirs(results_dir, exist_ok=True)
     print(f"Results will be saved in: {results_dir}")
 
@@ -297,35 +290,15 @@ def main():
     print(f"Initial preference generation with MIN_GAP: {current_min_gap}")
 
     clip_rewards = [clip_return(c) for c in clips_ds]
-    plot_rewards(clip_rewards, results_dir, it=0, writer=writer)
+    plot_rewards(clip_rewards, results_dir, it=0)
 
-    bins = None
-    if USE_BINNING:
-        bins = create_bins(None, clips_ds, results_dir, 0, NUM_BINS)
-        if (NUM_BINS * (NUM_BINS - 1)) > 0: 
-            num_samples_per_other_bin_initial = math.ceil(initial_target_pairs / (NUM_BINS * (NUM_BINS - 1)))
-            num_samples_per_other_bin_initial = max(1, num_samples_per_other_bin_initial) 
-        else: 
-            num_samples_per_other_bin_initial = 0 
-
-        if num_samples_per_other_bin_initial > 0:
-            print(f"Initial collection (binned): using num_samples_per_other_bin_initial = {num_samples_per_other_bin_initial} to target {initial_target_pairs} pairs.")
-            _prefs_list, _, _ = create_preferences(
-                bins,
-                num_samples_per_other_bin=num_samples_per_other_bin_initial,
-                min_gap=current_min_gap
-            )
+    num_rand_initial = initial_target_pairs
+    print(f"Initial collection (random): targeting num_rand_initial = {num_rand_initial}")
+    if len(clips_ds) >= 2: 
+            _prefs_list = sample_random_preferences(clips_ds, num_rand_initial, current_min_gap) # Use calculated value
             prefs = _prefs_list
-        else:
-            print(f"Initial collection (binned): num_samples_per_other_bin_initial is {num_samples_per_other_bin_initial}. No preferences will be generated via create_preferences.")
     else:
-        num_rand_initial = initial_target_pairs
-        print(f"Initial collection (random): targeting num_rand_initial = {num_rand_initial}")
-        if len(clips_ds) >= 2: 
-             _prefs_list = sample_random_preferences(clips_ds, num_rand_initial, current_min_gap) # Use calculated value
-             prefs = _prefs_list
-        else:
-            print(f"Initial collection (random): clips_ds has fewer than 2 segments ({len(clips_ds)}). Cannot sample pairs.")
+        print(f"Initial collection (random): clips_ds has fewer than 2 segments ({len(clips_ds)}). Cannot sample pairs.")
 
     print(f"Generated {len(prefs)} initial preference pairs.")
     for c1, c2, p in prefs:
@@ -391,7 +364,7 @@ def main():
         true_rewards = [r for res in all_results for r in res[0]]
         pred_rewards = [r for res in all_results for r in res[1]]
         if true_rewards and pred_rewards:
-            plot_true_vs_pred(true_rewards, pred_rewards, results_dir, it, writer=writer)
+            plot_true_vs_pred(true_rewards, pred_rewards, results_dir, it)
         else:
             print(f"Iteration {it}: Not enough true/predicted rewards to plot true vs pred.")
 
@@ -399,7 +372,7 @@ def main():
             bins = create_bins(bins, clips_ds, results_dir, it, NUM_BINS)
 
         segment_rewards_for_plot = [clip_return(c) for c in new_segments]
-        plot_rewards(segment_rewards_for_plot, results_dir, it, writer=writer)
+        plot_rewards(segment_rewards_for_plot, results_dir, it)
 
         rate_scaling_factor = REFERENCE_TIMESTEPS_FOR_RATE / (T_cumulative_ppo_steps_in_loop + REFERENCE_TIMESTEPS_FOR_RATE)
         _target_pairs_for_iter = round(BASE_PAIRS_PER_ITERATION_SCALER * rate_scaling_factor)
@@ -437,7 +410,7 @@ def main():
                         effective_bald_k = min(BALD_K, num_rand_iter_loop)
                         cand_pairs = []
                         if clips_ds:
-                            cand_pairs = select_variance_pairs(
+                            cand_pairs = select_active_pairs(
                                 clips_ds, reward_model,
                                 pool_size=num_rand_iter_loop,
                                 K=effective_bald_k, T=BALD_T,
@@ -483,7 +456,7 @@ def main():
             sub.reward_model = reward_model
 
         if clips_ds:
-            plot_correlation_by_bin(clips_ds, reward_model, it, results_dir, writer=writer)
+            plot_correlation_by_bin(clips_ds, reward_model, it, results_dir)
         else:
             print(f"Iteration {it}: No clips available to generate correlation plot.")
 

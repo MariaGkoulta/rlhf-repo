@@ -79,3 +79,14 @@ def plot_rewards(clip_rewards, results_dir=None, it=0):
     plt.savefig(plot_path_clips)
     plt.close()
     print(f"Saved clip rewards distribution plot to {plot_path_clips}")
+
+def plot_true_vs_pred(true_rewards, pred_rewards, results_dir=None, it=0):
+    plt.figure(figsize=(10, 6))
+    plt.scatter(true_rewards, pred_rewards, alpha=0.5)
+    plt.title(f"Iteration {it} - True vs. Predicted Rewards")
+    plt.xlabel("True Rewards")
+    plt.ylabel("Predicted Rewards")
+    plt.grid(True)
+    plt.tight_layout()
+    if results_dir:
+        plt.savefig(f"{results_dir}/iter_{it}_true_vs_pred.png")

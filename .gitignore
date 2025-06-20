@@ -131,4 +131,5 @@ dmypy.json
 *.pt
 
 # Ignore logs
-logs/
+logs/*
+*.zip
