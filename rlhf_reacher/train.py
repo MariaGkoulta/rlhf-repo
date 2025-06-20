@@ -22,7 +22,7 @@ from preferences import (
     create_bins, create_preferences, annotate_given_pairs
 )
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
-from reward import RewardModel
+from reward import RewardModel, train_reward_model_batched
 from bald import select_active_pairs
 from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred
 from custom_env import LearnedRewardEnv
@@ -56,103 +56,8 @@ BASE_PAIRS_PER_ITERATION_SCALER = 50
 TOTAL_PPO_TIMESTEPS = 10e6
 MAX_EPISODE_STEPS = 50
 OPTIMIZER_LR = 1e-3
-OPTIMIZER_WD = 1e-4
+OPTIMIZER_WD = 1e-3
 
-
-def train_reward_model_batched(
-    reward_model,
-    pref_dataset,
-    batch_size=64,
-    epochs=20,
-    val_frac=0.1,
-    patience=10,
-    optimizer=None,
-    device='cpu',
-    regularization_weight=1e-4, 
-    logger=None,
-    iteration=0
-):
-    reward_model.to(device)
-    total = len(pref_dataset)
-    val_size = int(total * val_frac)
-    train_size = total - val_size
-    train_data, val_data = random_split(pref_dataset, [train_size, val_size])
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
-
-    best_val_loss = float('inf')
-    no_improve = 0
-
-    for epoch in range(1, epochs+1):
-        iteration += 1
-        reward_model.train()
-        train_losses, train_accs = [], []
-        for s1, a1, s2, a2, prefs in train_loader:
-            N, T, obs_dim = s1.shape
-            _, _, act_dim = a1.shape
-
-            s1f = s1.view(N*T, obs_dim)
-            a1f = a1.view(N*T, act_dim)
-            s2f = s2.view(N*T, obs_dim)
-            a2f = a2.view(N*T, act_dim)
-
-            r1 = reward_model(s1f, a1f).view(N, T).sum(1)
-            r2 = reward_model(s2f, a2f).view(N, T).sum(1)
-            logits = r1 - r2
-
-            loss = F.binary_cross_entropy_with_logits(logits, prefs)
-            loss += regularization_weight * (r1.pow(2).mean() + r2.pow(2).mean())
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            train_losses.append(loss.item())
-            train_accs.append(((logits>0).float()==prefs).float().mean().item())
-
-        avg_train_loss = float(np.mean(train_losses))
-        avg_train_acc = float(np.mean(train_accs))
-        print(f"Epoch {epoch} | train_loss={avg_train_loss:.4f} | train_acc={avg_train_acc:.4f}", end=" | ")
-
-        reward_model.train()
-        val_losses, val_accs = [], []
-        with torch.no_grad():
-            for s1, a1, s2, a2, prefs in val_loader:
-                N, T, obs_dim = s1.shape
-                s1f = s1.view(N*T, obs_dim)
-                a1f = a1.view(N*T, a1.shape[2])
-                s2f = s2.view(N*T, obs_dim)
-                a2f = a2.view(N*T, a2.shape[2])
-
-                r1 = reward_model(s1f, a1f).view(N, T).sum(1)
-                r2 = reward_model(s2f, a2f).view(N, T).sum(1)
-                logits = r1 - r2
-
-                vloss = F.binary_cross_entropy_with_logits(logits, prefs)
-                val_losses.append(vloss.item())
-                val_accs.append(((logits>0).float()==prefs).float().mean().item())
-        avg_val_acc = float(np.mean(val_accs))
-        avg_val_loss = float(np.mean(val_losses))
-        print(f"val_loss={avg_val_loss:.4f} | val_acc={avg_val_acc:.4f}")
-
-        if logger is not None:
-            logger.record("reward_model/train_loss", avg_train_loss, exclude=("stdout",))
-            logger.record("reward_model/train_acc", avg_train_acc, exclude=("stdout",))
-            logger.record("reward_model/val_loss", avg_val_loss, exclude=("stdout",))
-            logger.record("reward_model/val_acc", avg_val_acc, exclude=("stdout",))
-            logger.dump(iteration)
-
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            no_improve = 0
-        else:
-            no_improve += 1
-            if no_improve >= patience:
-                print(f"Early stopping at epoch {epoch}")
-                break
-    reward_model.eval()
-    reward_model.to('cpu')
-    return reward_model, iteration
 
 def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50):
     def make_env(): return gym.make(env_id, render_mode=None, max_episode_steps=max_episode_steps)
@@ -368,9 +273,6 @@ def main():
         else:
             print(f"Iteration {it}: Not enough true/predicted rewards to plot true vs pred.")
 
-        if USE_BINNING:
-            bins = create_bins(bins, clips_ds, results_dir, it, NUM_BINS)
-
         segment_rewards_for_plot = [clip_return(c) for c in new_segments]
         plot_rewards(segment_rewards_for_plot, results_dir, it)
 
@@ -384,42 +286,26 @@ def main():
 
         if target_pairs_this_iter > 0 and clips_ds:
             if args.random:
-                if USE_BINNING:
-                    if not bins:
-                        print(f"Warning: Iteration {it}: USE_BINNING is True, but bins are None/empty. Skipping preference generation.")
-                    else:
-                        if (NUM_BINS * (NUM_BINS-1)) > 0:
-                            current_loop_samples_per_bin = math.ceil(target_pairs_this_iter / (NUM_BINS * (NUM_BINS - 1)))
-                            current_loop_samples_per_bin = max(1, current_loop_samples_per_bin)
-                        else:
-                            current_loop_samples_per_bin = target_pairs_this_iter if NUM_BINS == 1 else 0
-                        
-                        if current_loop_samples_per_bin > 0:
-                            new_prefs, _, _ = create_preferences(
-                                bins,
-                                num_samples_per_other_bin=current_loop_samples_per_bin,
-                                min_gap=current_min_gap
-                            )
+
+                print(it)
+                num_rand_iter_loop = target_pairs_this_iter
+                if T_cumulative_ppo_steps_in_loop < 300_000:
+                    new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop, current_min_gap)
                 else:
-                    print(it)
-                    num_rand_iter_loop = target_pairs_this_iter
-                    if T_cumulative_ppo_steps_in_loop < 300_000:
-                        new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop, current_min_gap)
-                    else:
-                        print(f"Using BALD...")
-                        effective_bald_k = min(BALD_K, num_rand_iter_loop)
-                        cand_pairs = []
-                        if clips_ds:
-                            cand_pairs = select_active_pairs(
-                                clips_ds, reward_model,
-                                pool_size=num_rand_iter_loop,
-                                K=effective_bald_k, T=BALD_T,
-                                device=device
-                            )
-                        if cand_pairs:
-                            _annotated_prefs, _, _ = annotate_given_pairs(cand_pairs, min_gap=current_min_gap)
-                            new_prefs = _annotated_prefs
-                            print(f"Iteration {it}: BALD targeted {target_pairs_this_iter} (effective K {effective_bald_k}), selected {len(new_prefs)} pairs.")
+                    print(f"Using BALD...")
+                    effective_bald_k = min(BALD_K, num_rand_iter_loop)
+                    cand_pairs = []
+                    if clips_ds:
+                        cand_pairs = select_active_pairs(
+                            clips_ds, reward_model,
+                            pool_size=num_rand_iter_loop,
+                            K=effective_bald_k, T=BALD_T,
+                            device=device
+                        )
+                    if cand_pairs:
+                        _annotated_prefs, _, _ = annotate_given_pairs(cand_pairs, min_gap=current_min_gap)
+                        new_prefs = _annotated_prefs
+                        print(f"Iteration {it}: BALD targeted {target_pairs_this_iter} (effective K {effective_bald_k}), selected {len(new_prefs)} pairs.")
                         
 
                 print(f"Iteration {it}: Targeted {target_pairs_this_iter} random pairs, sampled {len(new_prefs)}.")
