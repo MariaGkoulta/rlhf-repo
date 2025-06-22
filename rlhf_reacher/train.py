@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 # Custom code
 from preferences import (
     PreferenceDataset, clip_return,
-    annotate_given_pairs
+    annotate_pairs
 )
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 from reward import RewardModel, train_reward_model_batched
@@ -26,15 +26,13 @@ from custom_env import LearnedRewardEnv
 
 TOTAL_ITERS = 50
 INITIAL_POLICY_TS = 1
-EXTRACT_SEGMENTS = True  # If True, segments are extracted from clips
+EXTRACT_SEGMENTS = False  # If True, segments are extracted from clips
 SEGMENT_LEN = 30  # Length of segments to extract from clips
 NUM_EPISODES_TO_COLLECT_INITIAL = 200 # Number of full episodes to collect initially.
 NUM_EPISODES_TO_COLLECT_PER_UPDATE = 200  # Number of full episodes to collect in each iteration.
 # Only used if EXTRACT_SEGMENTS is True:
 TARGET_NUM_SEGMENTS_IF_EXTRACTING_INITIAL = 1000 # Target number of segments to sample from initial episodes.
 TARGET_NUM_SEGMENTS_IF_EXTRACTING_PER_UPDATE = 200
-INITIAL_MIN_GAP = 2
-FINAL_MIN_GAP = 0
 NUM_BINS = 120
 BALD_POOL_SIZE = 50000
 BALD_K = 10000
@@ -135,13 +133,12 @@ def extract_segments_from_episodes(
     print(f"Extracted {len(output_segments)} segments of length {segment_len} from {len(episodes)} episodes.")
     return output_segments
 
-def sample_random_preferences(clips, num_samples, min_gap):
+def sample_random_preferences(clips, num_samples):
     cand_pairs = []
     while len(cand_pairs) < num_samples:
         c1, c2 = random.sample(clips, 2)
-        if abs(sum(c1["rews"]) - sum(c2["rews"])) >= min_gap:
-            cand_pairs.append((c1, c2))
-    prefs, _, _ = annotate_given_pairs(cand_pairs, min_gap=min_gap)
+        cand_pairs.append((c1, c2))
+    prefs, _, _ = annotate_pairs(cand_pairs)
     return prefs    
 
 def main():
@@ -199,16 +196,13 @@ def main():
     initial_target_pairs = int(TOTAL_TARGET_PAIRS * INITIAL_COLLECTION_FRACTION)
     print(f"Targeting {initial_target_pairs} initial preference pairs.")
 
-    current_min_gap = INITIAL_MIN_GAP
-    print(f"Initial preference generation with MIN_GAP: {current_min_gap}")
-
     clip_rewards = [clip_return(c) for c in clips_ds]
     plot_rewards(clip_rewards, results_dir, it=0)
 
     num_rand_initial = initial_target_pairs
     print(f"Initial collection (random): targeting num_rand_initial = {num_rand_initial}")
     if len(clips_ds) >= 2: 
-            _prefs_list = sample_random_preferences(clips_ds, num_rand_initial, current_min_gap) # Use calculated value
+            _prefs_list = sample_random_preferences(clips_ds, num_rand_initial) # Use calculated value
             prefs = _prefs_list
     else:
         print(f"Initial collection (random): clips_ds has fewer than 2 segments ({len(clips_ds)}). Cannot sample pairs.")
@@ -255,11 +249,7 @@ def main():
     while T_cumulative_ppo_steps_in_loop < TOTAL_PPO_TIMESTEPS:
         it += 1
         
-        fraction_ppo_training_done = min(1.0, max(0.0, T_cumulative_ppo_steps_in_loop / TOTAL_PPO_TIMESTEPS))
-        current_min_gap = INITIAL_MIN_GAP - (INITIAL_MIN_GAP - FINAL_MIN_GAP) * fraction_ppo_training_done
-        current_min_gap = max(current_min_gap, FINAL_MIN_GAP)
-        
-        print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{TOTAL_PPO_TIMESTEPS}, Using MIN_GAP: {current_min_gap:.2f}, Total Prefs: {len(pref_ds)}/{TOTAL_TARGET_PAIRS}")
+        print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{TOTAL_PPO_TIMESTEPS}, Total Prefs: {len(pref_ds)}/{TOTAL_TARGET_PAIRS}")
 
         policy.learn(
             total_timesteps=PPO_TIMESTEPS_PER_ITER,
@@ -304,7 +294,7 @@ def main():
                 print(it)
                 num_rand_iter_loop = target_pairs_this_iter
                 if T_cumulative_ppo_steps_in_loop < 300_000:
-                    new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop, current_min_gap)
+                    new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop)
                 else:
                     print(f"Using BALD...")
                     effective_bald_k = min(BALD_K, num_rand_iter_loop)
@@ -317,7 +307,7 @@ def main():
                             device=device
                         )
                     if cand_pairs:
-                        _annotated_prefs, _, _ = annotate_given_pairs(cand_pairs, min_gap=current_min_gap)
+                        _annotated_prefs, _, _ = annotate_pairs(cand_pairs)
                         new_prefs = _annotated_prefs
                         print(f"Iteration {it}: BALD targeted {target_pairs_this_iter} (effective K {effective_bald_k}), selected {len(new_prefs)} pairs.")
                         
@@ -337,7 +327,7 @@ def main():
                     )
 
                 if cand_pairs:
-                    _annotated_prefs, _, _ = annotate_given_pairs(cand_pairs, min_gap=current_min_gap)
+                    _annotated_prefs, _, _ = annotate_pairs(cand_pairs)
                     new_prefs = _annotated_prefs
                     print(f"Iteration {it}: BALD targeted {target_pairs_this_iter} (effective K {effective_bald_k}), selected {len(new_prefs)} pairs.")
                 else:

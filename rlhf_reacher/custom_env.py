@@ -2,7 +2,7 @@ import gymnasium as gym
 import numpy as np
 
 class LearnedRewardEnv(gym.Wrapper):
-    def __init__(self, env, reward_model, normalize_rewards=True):
+    def __init__(self, env, reward_model):
         super().__init__(env)
         self.reward_model = reward_model
         self.prev_obs = None 
@@ -10,9 +10,6 @@ class LearnedRewardEnv(gym.Wrapper):
         self._learned_sum = 0.0 
         self.ep_true = []
         self.ep_learned = []
-
-        # Note: normalize_rewards parameter is kept for compatibility but not used
-        # since VecNormalize handles reward normalization
 
     def get_and_clear_episode_rewards(self):
         """Returns the collected episode rewards and clears the internal lists."""

@@ -120,7 +120,7 @@ def create_preferences(bins, num_samples_per_other_bin=DEFAULT_SAMPLES_PER_OTHER
     return prefs, reward_differences, generated_rewards
 
 
-def annotate_given_pairs(pairs_to_annotate, min_gap=MIN_GAP):
+def annotate_pairs(pairs_to_annotate):
     print(f"Number of pairs to annotate: {len(pairs_to_annotate)}")
     prefs = []
     reward_differences = []
@@ -129,8 +129,6 @@ def annotate_given_pairs(pairs_to_annotate, min_gap=MIN_GAP):
     for c1, c2 in tqdm(pairs_to_annotate, desc="Annotating selected pairs"):
         r1, r2 = clip_return(c1), clip_return(c2)
         difference = abs(r1 - r2)
-        if difference < min_gap:
-            continue
         prefs.append((c1, c2, 1 if r1 > r2 else 0))
         reward_differences.append(difference)
         rewards_log.append((r1, r2))
