@@ -11,37 +11,33 @@ from plots import plot_bins
 NUM_PAIRS = 2000
 MIN_GAP = 2
 DEFAULT_SAMPLES_PER_OTHER_BIN = 20
-LOWER_BIN = -60
-UPPER_BIN = 0
-KEEP_PREF_FRACTION = 1.0 # Fraction of preferences to keep when adding new ones
+LOWER_BIN = 0
+UPPER_BIN = 150
+MAX_BUFFER_LEN = 50000
 
 class PreferenceDataset(Dataset):
     """
     Stores preference-labeled clip pairs as tensors, converting each clip only once on addition.
     """
-    def __init__(self, device='cpu'):
+    def __init__(self, maxlen=MAX_BUFFER_LEN, device='cpu', segment_len=None):
         self.s1 = []
         self.a1 = []
         self.s2 = []
         self.a2 = []
         self.prefs = []
+        self.maxlen = maxlen
         self.device = device
+        self.segment_len = segment_len
 
     def add(self, clip1, clip2, pref):
-
-        if KEEP_PREF_FRACTION < 1.0 and len(self.prefs) > 0:
-            keep_n = int(len(self.prefs) * KEEP_PREF_FRACTION)
-            idxs = random.sample(range(len(self.prefs)), keep_n)
-            self.s1    = [self.s1[i]    for i in idxs]
-            self.a1    = [self.a1[i]    for i in idxs]
-            self.s2    = [self.s2[i]    for i in idxs]
-            self.a2    = [self.a2[i]    for i in idxs]
-            self.prefs = [self.prefs[i] for i in idxs]
-
-        s1 = torch.tensor(np.stack(clip1['obs']), dtype=torch.float32, device=self.device)
-        a1 = torch.tensor(np.stack(clip1['acts']), dtype=torch.float32, device=self.device)
-        s2 = torch.tensor(np.stack(clip2['obs']), dtype=torch.float32, device=self.device)
-        a2 = torch.tensor(np.stack(clip2['acts']), dtype=torch.float32, device=self.device)
+        if len(self.prefs) >= self.maxlen:
+            self.s1.pop(0)
+            self.a1.pop(0)
+            self.s2.pop(0)
+            self.a2.pop(0)
+            self.prefs.pop(0)
+        s1, a1 = self._process_clip(clip1)
+        s2, a2 = self._process_clip(clip2)
         p  = torch.tensor(pref, dtype=torch.float32, device=self.device)
         self.s1.append(s1)
         self.a1.append(a1)
@@ -51,6 +47,33 @@ class PreferenceDataset(Dataset):
 
     def __len__(self):
         return len(self.prefs)
+    
+    def _process_clip(self, clip):
+        """Pads or truncates a clip to self.segment_len."""
+        obs = np.stack(clip['obs'])
+        acts = np.stack(clip['acts'])
+        
+        current_len = obs.shape[0]
+
+        # If segment_len is not set, we don't pad or truncate.
+        if self.segment_len is None:
+            return torch.tensor(obs, dtype=torch.float32, device=self.device), \
+                   torch.tensor(acts, dtype=torch.float32, device=self.device)
+
+        if current_len > self.segment_len:
+            # Truncate the clip if it's too long
+            obs = obs[:self.segment_len]
+            acts = acts[:self.segment_len]
+        elif current_len < self.segment_len:
+            # Pad the clip with zeros if it's too short
+            pad_len = self.segment_len - current_len
+            obs_pad = np.zeros((pad_len, obs.shape[1]), dtype=np.float32)
+            acts_pad = np.zeros((pad_len, acts.shape[1]), dtype=np.float32)
+            obs = np.concatenate([obs, obs_pad], axis=0)
+            acts = np.concatenate([acts, acts_pad], axis=0)
+        
+        return torch.tensor(obs, dtype=torch.float32, device=self.device), \
+               torch.tensor(acts, dtype=torch.float32, device=self.device)
 
     def __getitem__(self, idx):
         return self.s1[idx], self.a1[idx], self.s2[idx], self.a2[idx], self.prefs[idx]
@@ -110,8 +133,6 @@ def create_preferences(bins, num_samples_per_other_bin=DEFAULT_SAMPLES_PER_OTHER
                 r1 = clip_return(clip1)
                 r2 = clip_return(clip2)
                 difference = abs(r1 - r2)
-                if difference < min_gap:
-                    continue
                 preference_label = 1 if r1 > r2 else 0
                 prefs.append((clip1, clip2, preference_label))
                 reward_differences.append(difference)
@@ -120,7 +141,7 @@ def create_preferences(bins, num_samples_per_other_bin=DEFAULT_SAMPLES_PER_OTHER
     return prefs, reward_differences, generated_rewards
 
 
-def annotate_given_pairs(pairs_to_annotate, min_gap=MIN_GAP):
+def annotate_pairs(pairs_to_annotate, min_gap=MIN_GAP):
     print(f"Number of pairs to annotate: {len(pairs_to_annotate)}")
     prefs = []
     reward_differences = []
