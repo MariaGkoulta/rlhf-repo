@@ -1,17 +1,17 @@
 
-ENV_ID = "Hopper-v4"
+ENV_ID = "HalfCheetah-v5"
 # For some MuJoCo envs, we might want to disable termination on unhealthy states
 # to learn from a wider range of behaviors.
 # Add environment IDs to this list to apply the setting.
 TERMINATE_WHEN_UNHEALTHY = False
-UNHEALTHY_TERMINATION_ENVS = ["Hopper-v4", "Walker2d-v4", "Ant-v4", "Humanoid-v4"]
+UNHEALTHY_TERMINATION_ENVS = ["Hopper-v4", "Walker2d-v5", "Ant-v4", "Humanoid-v4"]
 
 INITIAL_POLICY_TS = 1
 NORMALIZE_REWARDS = True
 EXTRACT_SEGMENTS = True  # If True, segments are extracted from clips
-SEGMENT_LEN = 200 # Length of segments to extract from clips
-INITIAL_SEGMENT_LEN = 200 # Length of segments to extract from clips
-FINAL_SEGMENT_LEN = 200 # Length of segments to extract from clips
+SEGMENT_LEN = 40 # Length of segments to extract from clips
+INITIAL_SEGMENT_LEN = 40 # Length of segments to extract from clips
+FINAL_SEGMENT_LEN = 40 # Length of segments to extract from clips
 
 NUM_EPISODES_TO_COLLECT_INITIAL = 200 # Number of full episodes to collect initially.
 NUM_EPISODES_TO_COLLECT_PER_UPDATE = 200  # Number of full episodes to collect in each iteration.
@@ -27,7 +27,7 @@ BALD_T = 10
 # Scales the number of pairs collected per iteration based on the rate.
 # If T_cumulative is 0, rate factor is 1, so this is the initial target pairs per iter in main loop.
 BASE_PAIRS_PER_ITERATION_SCALER = 50
-TOTAL_TARGET_PAIRS = 500
+TOTAL_TARGET_PAIRS = 750
 INITIAL_COLLECTION_FRACTION = 0.1
 PPO_TIMESTEPS_PER_ITER = 20000  # Train policy more often with fewer steps
 REFERENCE_TIMESTEPS_FOR_RATE = 5e6

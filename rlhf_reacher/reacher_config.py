@@ -24,7 +24,7 @@ BALD_T = 10
 # Scales the number of pairs collected per iteration based on the rate.
 # If T_cumulative is 0, rate factor is 1, so this is the initial target pairs per iter in main loop.
 BASE_PAIRS_PER_ITERATION_SCALER = 50
-TOTAL_TARGET_PAIRS = 7000
+TOTAL_TARGET_PAIRS = 1000
 INITIAL_COLLECTION_FRACTION = 0.3
 PPO_TIMESTEPS_PER_ITER = 20000  # Train policy more often with fewer steps
 REFERENCE_TIMESTEPS_FOR_RATE = 5e6
