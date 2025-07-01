@@ -1,65 +1,76 @@
+# filepath: /rlhf_reacher/src/reward_ensemble.py
+import numpy as np
 import torch
-import random
+from torch.utils.data import Subset
 from reward import RewardModel, train_reward_model_batched
+import random
 
-class RewardModelEnsemble:
-    """
-    An ensemble of reward models for uncertainty estimation and active preference selection.
-    """
-    def __init__(self, obs_dim, act_dim, n_models=5, device='cpu'):
-        self.n_models = n_models
-        self.device = device
-        self.models = [
-            RewardModel(obs_dim, act_dim).to(device)
-            for _ in range(n_models)
-        ]
+from preferences import annotate_pairs
 
-    def train_ensemble(self, pref_dataset, **train_kwargs):
-        """
-        Trains each model in the ensemble on a bootstrap sample of the preference dataset.
-        """
+class RewardEnsemble:
+    def __init__(self, obs_dim, act_dim, num_models=5, dropout_prob=0.1):
+        self.models = [RewardModel(obs_dim, act_dim, dropout_prob) for _ in range(num_models)]
+
+    def forward(self, states, actions):
+        predictions = torch.stack([model(states, actions) for model in self.models])
+        mean_predictions = predictions.mean(dim=0)
+        variance_predictions = predictions.var(dim=0)
+        return mean_predictions, variance_predictions
+
+    def predict_reward(self, obs, action):
+        s = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+        a = torch.tensor(action, dtype=torch.float32).unsqueeze(0)
+        mean_reward, variance_reward = self.forward(s, a)
+        return mean_reward.item(), variance_reward.item()
+    
+    def train_ensemble(self, pref_dataset, batch_size=64, epochs=20, val_frac=0.1, patience=10, optimizer=None, optimizer_lr=1e-3, optimizer_wd=1e-4, device='cpu', regularization_weight=1e-4, logger=None, iteration=0):
+        dataset_size = len(pref_dataset)
         for i, model in enumerate(self.models):
-            indices = torch.randint(0, len(pref_dataset), (len(pref_dataset),))
-            bootstrap_dataset = torch.utils.data.Subset(pref_dataset, indices)
-            print(f"Training model {i+1}/{self.n_models} on bootstrap sample of size {len(bootstrap_dataset)}")
+            indices = np.random.choice(dataset_size, dataset_size, replace=True)
+            bootstrap_dataset = Subset(pref_dataset, indices)
+            print(f"Training model {i+1}/{len(self.models)} on bootstrap sample")
             train_reward_model_batched(
-                model, bootstrap_dataset, **train_kwargs
+                model, bootstrap_dataset, batch_size=batch_size, epochs=epochs,
+                val_frac=val_frac, patience=patience, optimizer=optimizer,
+                optimizer_lr=optimizer_lr, optimizer_wd=optimizer_wd,
+                device=device, regularization_weight=regularization_weight,
+                logger=logger, iteration=iteration
             )
 
-    def predict_rewards(self, obs, acts):
-        """
-        Returns a list of reward predictions from each model in the ensemble.
-        """
-        with torch.no_grad():
-            preds = []
-            for model in self.models:
-                pred = model.predict_reward(obs, acts)
-                preds.append(pred)
-            return preds
+    def state_dict(self):
+        return [model.state_dict() for model in self.models]
 
-    def select_pairs_by_disagreement(self, candidate_pairs, top_k=50):
-        """
-        Selects preference pairs with the highest ensemble disagreement (variance).
-        Args:
-            candidate_pairs: List of (clip1, clip2) tuples.
-            top_k: Number of pairs to select.
-        Returns:
-            List of selected (clip1, clip2) tuples.
-        """
-        disagreements = []
-        for c1, c2 in candidate_pairs:
-            # Compute sum of rewards for each model in the ensemble
-            c1_rewards = [float(torch.sum(model.predict_reward(
-                torch.tensor(c1["obs"]).float().to(self.device),
-                torch.tensor(c1["acts"]).float().to(self.device)
-            ))) for model in self.models]
-            c2_rewards = [float(torch.sum(model.predict_reward(
-                torch.tensor(c2["obs"]).float().to(self.device),
-                torch.tensor(c2["acts"]).float().to(self.device)
-            ))) for model in self.models]
-            prefs = [int(r1 > r2) for r1, r2 in zip(c1_rewards, c2_rewards)]
-            disagreement = torch.var(torch.tensor(prefs, dtype=torch.float)).item()
-            disagreements.append(disagreement)
-        top_indices = sorted(range(len(disagreements)), key=lambda i: -disagreements[i])[:top_k]
-        selected_pairs = [candidate_pairs[i] for i in top_indices]
-        return selected_pairs
+    def load_state_dict(self, state_dicts):
+        for model, sd in zip(self.models, state_dicts):
+            model.load_state_dict(sd)
+
+def select_high_variance_pairs(clips, reward_ensemble, num_pairs, min_gap):
+    candidate_pairs = []
+    num_candidates = min(len(clips) * (len(clips) - 1) // 2, num_pairs * 10)
+
+    indices = list(range(len(clips)))
+    while len(candidate_pairs) < num_candidates:
+        i, j = random.sample(indices, 2)
+        c1, c2 = clips[i], clips[j]
+        if abs(sum(c1["rews"]) - sum(c2["rews"])) >= min_gap:
+            candidate_pairs.append((c1, c2))
+        if len(candidate_pairs) >= num_candidates:
+            break
+    s1_batch = torch.tensor(np.array([p[0]["obs"] for p in candidate_pairs]), dtype=torch.float32)
+    a1_batch = torch.tensor(np.array([p[0]["acts"] for p in candidate_pairs]), dtype=torch.float32)
+    s2_batch = torch.tensor(np.array([p[1]["obs"] for p in candidate_pairs]), dtype=torch.float32)
+    a2_batch = torch.tensor(np.array([p[1]["acts"] for p in candidate_pairs]), dtype=torch.float32)
+
+    variances = []
+    with torch.no_grad():
+        preds1_all_models = torch.stack([model(s1_batch, a1_batch).sum(dim=-1) for model in reward_ensemble.models])
+        preds2_all_models = torch.stack([model(s2_batch, a2_batch).sum(dim=-1) for model in reward_ensemble.models])
+        
+        preferences = (preds1_all_models > preds2_all_models).float() # (num_models, num_candidates)
+        variances = torch.var(preferences, dim=0).cpu().numpy()
+
+    top_indices = np.argsort(-variances)[:num_pairs]
+    selected_pairs = [candidate_pairs[i] for i in top_indices]
+    
+    prefs, _, _ = annotate_pairs(selected_pairs, min_gap=min_gap)
+    return prefs

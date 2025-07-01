@@ -34,7 +34,11 @@ class LearnedRewardEnv(gym.Wrapper):
 
     def step(self, action):
         obs, true_r, terminated, truncated, info = super().step(action)
+
         learned_r_raw = self.reward_model.predict_reward(self.prev_obs, action)
+        
+        if isinstance(learned_r_raw, tuple):
+            learned_r_raw = learned_r_raw[0]
 
         self._true_sum += true_r
         

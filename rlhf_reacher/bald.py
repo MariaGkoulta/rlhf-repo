@@ -43,7 +43,7 @@ def sample_random_pairs(clips, num_pairs, min_gap):
         attempts += 1
     return cand_pairs
 
-def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu'): # Added device parameter
+def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu', logger=None, iteration=0): # Added device parameter
     if len(clips) < 2:
         return []
     pairs = []
@@ -57,6 +57,14 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
         attempts += 1
     pairs = [(clips[i], clips[j]) for i, j in pair_candidates]
     scores = [bald_score(model, c1, c2, T, device=device) for c1,c2 in pairs]
+
+    if logger is not None:
+        logger.record("reward_model/avg_bald_score", np.mean(scores), exclude=("stdout",))
+        logger.record("reward_model/max_bald_score", np.max(scores), exclude=("stdout",))
+        logger.record("reward_model/min_bald_score", np.min(scores), exclude=("stdout")),
+        logger.record("reward_model/bald_variance", np.var(scores), exclude=("stdout",))                                                       
+        logger.dump(iteration)
+
     actual_K = min(K, len(scores))
     idxs = np.argsort(scores)[-actual_K:]
     return [pairs[i] for i in idxs]

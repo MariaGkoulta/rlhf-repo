@@ -27,7 +27,7 @@ class RewardModel(nn.Module):
         
 def train_reward_model_batched(
     rm, pref_dataset, batch_size=64, epochs=20,
-    val_frac=0.1, patience=10, optimizer=None, device='cpu', regularization_weight=1e-4, 
+    val_frac=0.1, patience=10, optimizer=None, optimizer_lr=None, optimizer_wd=None, device='cpu', regularization_weight=1e-4,
     logger=None, iteration=0
 ):
     rm.to(device)
@@ -40,6 +40,9 @@ def train_reward_model_batched(
 
     best_val_loss = float('inf')
     no_improve = 0
+
+    if optimizer is None:
+        optimizer = torch.optim.Adam(rm.parameters(), lr=optimizer_lr, weight_decay=optimizer_wd)
 
     for epoch in range(1, epochs+1):
         iteration += 1

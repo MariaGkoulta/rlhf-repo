@@ -1,5 +1,0 @@
-# ignore folders starting with experiment_results followed by anything
-experiment_results*
-# ignore folders starting with uncertainty_study
-uncertainty_study*
-experiments*

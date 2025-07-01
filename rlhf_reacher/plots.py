@@ -6,15 +6,19 @@ import io
 
 def plot_correlation_by_bin(clips, reward_model, iteration, results_dir, bin_width=1.0, writer=None):
     true_sums = [sum(c["rews"]) for c in clips]
-    predicted_sums = [
-        sum(reward_model.predict_reward(o, a)
-            for o, a in zip(c["obs"], c["acts"]))
-        for c in clips
-    ]
+    predicted_sums = []
+    for clip in clips:
+        total = 0.0
+        for o, a in zip(clip["obs"], clip["acts"]):
+            pred = reward_model.predict_reward(o, a)
+            if isinstance(pred, tuple):
+                total += pred[0]
+            else:
+                total += pred
+        predicted_sums.append(total)
     min_r, max_r = np.floor(min(true_sums)), np.ceil(max(true_sums))
     bins = np.arange(min_r, max_r + bin_width, bin_width)
     bin_idxs = np.digitize(true_sums, bins) - 1
-
     bin_centers, corrs = [], []
     for i in range(len(bins) - 1):
         idxs = [j for j, b in enumerate(bin_idxs) if b == i]
