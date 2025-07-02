@@ -167,6 +167,7 @@ def main():
     args = parser.parse_args()
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_type = "random" if args.random else "active"
     results_dir = f"{env_id}_results_{timestamp}"
     os.makedirs(results_dir, exist_ok=True)
     print(f"Results will be saved in: {results_dir}")
@@ -175,7 +176,12 @@ def main():
     config_dst = os.path.join(results_dir, "hopper_config.py")
     shutil.copyfile(config_src, config_dst)
 
-    tensorboard_log_dir = f"./logs/{env_id}/"
+    # Create a shared parent directory for all runs of this environment
+    shared_log_dir = f"./logs/{env_id}/"
+    # Create a unique subdirectory for this specific run with experiment type
+    run_log_dir = f"{shared_log_dir}{experiment_type}_{timestamp}/"
+    
+    tensorboard_log_dir = run_log_dir
     writer = SummaryWriter(log_dir=tensorboard_log_dir)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -199,7 +205,7 @@ def main():
         ent_coef=PPO_ENT_COEF,
         n_epochs=PPO_N_EPOCHS,
         learning_rate=PPO_LR,
-        tensorboard_log=f"./logs/{env_id}/"
+        tensorboard_log=run_log_dir
     )
     policy.learn(total_timesteps=INITIAL_POLICY_TS)
     time_limited_raw_env.close()
