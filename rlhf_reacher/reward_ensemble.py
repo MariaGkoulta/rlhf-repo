@@ -23,18 +23,26 @@ class RewardEnsemble:
         mean_reward, variance_reward = self.forward(s, a)
         return mean_reward.item(), variance_reward.item()
     
-    def train_ensemble(self, pref_dataset, batch_size=64, epochs=20, val_frac=0.1, patience=10, optimizer=None, optimizer_lr=1e-3, optimizer_wd=1e-4, device='cpu', regularization_weight=1e-4, logger=None, iteration=0):
-        dataset_size = len(pref_dataset)
+    def train_ensemble(self, train_pref_ds, val_pref_ds, device, epochs, patience, optimizer_lr, optimizer_wd, regularization_weight, logger, iteration):
+        dataset_size = len(train_pref_ds)
         for i, model in enumerate(self.models):
             indices = np.random.choice(dataset_size, dataset_size, replace=True)
-            bootstrap_dataset = Subset(pref_dataset, indices)
+            bootstrap_dataset = Subset(train_pref_ds, indices)
             print(f"Training model {i+1}/{len(self.models)} on bootstrap sample")
+            
+            optimizer = torch.optim.Adam(model.parameters(), lr=optimizer_lr, weight_decay=optimizer_wd)
+            
             train_reward_model_batched(
-                model, bootstrap_dataset, batch_size=batch_size, epochs=epochs,
-                val_frac=val_frac, patience=patience, optimizer=optimizer,
-                optimizer_lr=optimizer_lr, optimizer_wd=optimizer_wd,
-                device=device, regularization_weight=regularization_weight,
-                logger=logger, iteration=iteration
+                model,
+                train_dataset=bootstrap_dataset,
+                val_dataset=val_pref_ds,
+                device=device,
+                epochs=epochs,
+                patience=patience,
+                optimizer=optimizer,
+                regularization_weight=regularization_weight,
+                logger=logger,
+                iteration=iteration
             )
 
     def state_dict(self):

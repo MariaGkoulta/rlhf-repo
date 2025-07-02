@@ -26,94 +26,98 @@ class RewardModel(nn.Module):
             return self.forward(s, a).item()
         
 def train_reward_model_batched(
-    rm, pref_dataset, batch_size=64, epochs=20,
-    val_frac=0.1, patience=10, optimizer=None, optimizer_lr=None, optimizer_wd=None, device='cpu', regularization_weight=1e-4,
-    logger=None, iteration=0
+    model,
+    train_dataset,
+    val_dataset,
+    device,
+    epochs,
+    patience,
+    optimizer,
+    regularization_weight,
+    logger,
+    iteration
 ):
-    rm.to(device)
-    total = len(pref_dataset)
-    val_size = int(total * val_frac)
-    train_size = total - val_size
-    train_ds, val_ds = random_split(pref_dataset, [train_size, val_size])
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
+    """
+    Trains the reward model using separate training and validation datasets.
+    """
+    model.to(device)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
     best_val_loss = float('inf')
-    no_improve = 0
+    patience_counter = 0
 
-    if optimizer is None:
-        optimizer = torch.optim.Adam(rm.parameters(), lr=optimizer_lr, weight_decay=optimizer_wd)
-
-    for epoch in range(1, epochs+1):
-        iteration += 1
-        rm.train()
-        train_losses, train_accs = [], []
-        for s1, a1, s2, a2, prefs in train_loader:
-            N, T, obs_dim = s1.shape
-            _, _, act_dim = a1.shape
-
-            s1f = s1.view(N*T, obs_dim)
-            a1f = a1.view(N*T, act_dim)
-            s2f = s2.view(N*T, obs_dim)
-            a2f = a2.view(N*T, act_dim)
-
-            r1 = rm(s1f, a1f).view(N, T).sum(1)
-            r2 = rm(s2f, a2f).view(N, T).sum(1)
-            logits = r1 - r2
-
-            loss = F.binary_cross_entropy_with_logits(logits, prefs)
-            loss += regularization_weight * (r1.pow(2).mean() + r2.pow(2).mean())
-
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0
+        train_correct = 0
+        train_total = 0
+        for s1, a1, s2, a2, pref in train_loader:
+            s1, a1, s2, a2, pref = s1.to(device), a1.to(device), s2.to(device), a2.to(device), pref.to(device)
+            
             optimizer.zero_grad()
-            loss.backward()
+            r1 = model(s1, a1).sum(dim=1)
+            r2 = model(s2, a2).sum(dim=1)
+            
+            logits = r1 - r2
+            loss = nn.BCEWithLogitsLoss()(logits, pref)
+            
+            # L2 regularization on rewards
+            l2_reg = regularization_weight * (torch.norm(r1) + torch.norm(r2))
+            total_loss = loss + l2_reg
+            
+            total_loss.backward()
             optimizer.step()
+            train_loss += total_loss.item()
 
-            train_losses.append(loss.item())
-            train_accs.append(((logits>0).float()==prefs).float().mean().item())
+            train_preds = (logits > 0).float()
+            train_correct += (train_preds == pref).sum().item()
+            train_total += pref.size(0)
+        
+        avg_train_loss = train_loss / len(train_loader)
+        train_acc = train_correct / train_total
 
-        avg_train_loss = float(np.mean(train_losses))
-        avg_train_acc = float(np.mean(train_accs))
-        print(f"Epoch {epoch} | train_loss={avg_train_loss:.4f} | train_acc={avg_train_acc:.4f}", end=" | ")
 
-        rm.train()
-        val_losses, val_accs = [], []
+        # Validation
+        model.eval()
+        val_loss = 0
+        correct = 0
+        total = 0
         with torch.no_grad():
-            for s1, a1, s2, a2, prefs in val_loader:
-                N, T, obs_dim = s1.shape
-                s1f = s1.view(N*T, obs_dim)
-                a1f = a1.view(N*T, a1.shape[2])
-                s2f = s2.view(N*T, obs_dim)
-                a2f = a2.view(N*T, a2.shape[2])
-
-                r1 = rm(s1f, a1f).view(N, T).sum(1)
-                r2 = rm(s2f, a2f).view(N, T).sum(1)
+            for s1, a1, s2, a2, pref in val_loader:
+                s1, a1, s2, a2, pref = s1.to(device), a1.to(device), s2.to(device), a2.to(device), pref.to(device)
+                r1 = model(s1, a1).sum(dim=1)
+                r2 = model(s2, a2).sum(dim=1)
                 logits = r1 - r2
+                val_loss += nn.BCEWithLogitsLoss()(logits, pref).item()
+                
+                preds = (logits > 0).float()
+                correct += (preds == pref).sum().item()
+                total += pref.size(0)
+        
+        avg_val_loss = val_loss / len(val_loader)
+        val_acc = correct / total
 
-                vloss = F.binary_cross_entropy_with_logits(logits, prefs)
-                val_losses.append(vloss.item())
-                val_accs.append(((logits>0).float()==prefs).float().mean().item())
-        avg_val_acc = float(np.mean(val_accs))
-        avg_val_loss = float(np.mean(val_losses))
-        print(f"val_loss={avg_val_loss:.4f} | val_acc={avg_val_acc:.4f}")
-
-        if logger is not None:
-            logger.record("reward_model/train_loss", avg_train_loss, exclude=("stdout",))
-            logger.record("reward_model/train_acc", avg_train_acc, exclude=("stdout",))
-            logger.record("reward_model/val_loss", avg_val_loss, exclude=("stdout",))
-            logger.record("reward_model/val_acc", avg_val_acc, exclude=("stdout",))
-            logger.dump(iteration)
+        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        if logger:
+            logger.record("reward_model/train_loss", avg_train_loss, exclude='stdout')
+            logger.record("reward_model/train_accuracy", train_acc, exclude='stdout')
+            logger.record("reward_model/val_loss", avg_val_loss, exclude='stdout')
+            logger.record("reward_model/val_accuracy", val_acc, exclude='stdout')
+            logger.dump(step=iteration)
+            iteration += 1
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            no_improve = 0
+            patience_counter = 0
+            # torch.save(model.state_dict(), 'best_reward_model.pth')
         else:
-            no_improve += 1
-            if no_improve >= patience:
-                print(f"Early stopping at epoch {epoch}")
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch+1}")
                 break
-    rm.eval()
-    rm.to('cpu')
-    return rm, iteration
+    
+    return model, iteration
         
 
         

@@ -135,6 +135,23 @@ def sample_random_preferences(clips, num_samples, min_gap):
     prefs, _, _ = annotate_pairs(cand_pairs, min_gap=min_gap)
     return prefs    
 
+def linear_schedule(initial_value: float):
+    """
+    Linear learning rate schedule.
+    :param initial_value: Initial learning rate.
+    :return: schedule that computes
+        current learning rate depending on remaining progress
+    """
+    def func(progress_remaining: float) -> float:
+        """
+        Progress will decrease from 1 (beginning) to 0.
+        :param progress_remaining:
+        :return: current learning rate
+        """
+        return progress_remaining * initial_value
+
+    return func
+
 def main():
 
     env_id = ENV_ID
@@ -162,7 +179,8 @@ def main():
     writer = SummaryWriter(log_dir=tensorboard_log_dir)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    pref_ds = PreferenceDataset(device=device, segment_len=FINAL_SEGMENT_LEN)
+    train_pref_ds = PreferenceDataset(device=device, segment_len=FINAL_SEGMENT_LEN)
+    val_pref_ds = PreferenceDataset(device=device, segment_len=FINAL_SEGMENT_LEN)
 
     raw_env = None
     if env_id in UNHEALTHY_TERMINATION_ENVS:
@@ -219,8 +237,17 @@ def main():
         print(f"Initial collection (random): clips_ds has fewer than 2 segments ({len(clips_ds)}). Cannot sample pairs.")
 
     print(f"Generated {len(prefs)} initial preference pairs.")
-    for c1, c2, p in prefs:
-        pref_ds.add(c1, c2, p)
+    random.shuffle(prefs)
+    val_split_idx = int(len(prefs) * 0.2)
+    val_prefs = prefs[:val_split_idx]
+    train_prefs = prefs[val_split_idx:]
+
+    for c1, c2, p in train_prefs:
+        train_pref_ds.add(c1, c2, p)
+    for c1, c2, p in val_prefs:
+        val_pref_ds.add(c1, c2, p)
+    
+    print(f"Split initial preferences into {len(train_pref_ds)} training and {len(val_pref_ds)} validation pairs.")
 
     obs_dim = policy.observation_space.shape[0]
     act_dim = policy.action_space.shape[0]
@@ -231,7 +258,8 @@ def main():
         optimizer = torch.optim.Adam(reward_model.parameters(), lr=REWARD_MODEL_LEARNING_RATE, weight_decay=REWARD_MODEL_WEIGHT_DECAY)
         reward_model, reward_logger_iteration = train_reward_model_batched(
             reward_model,
-            pref_ds,
+            train_pref_ds,
+            val_pref_ds,
             device=device,
             epochs=REWARD_MODEL_EPOCHS,
             patience=REWARD_MODEL_PATIENCE,
@@ -243,7 +271,8 @@ def main():
     else: 
         reward_ensemble = RewardEnsemble(obs_dim, act_dim, num_models=REWARD_ENSEMBLES, dropout_prob=REWARD_MODEL_DROPOUT_PROB)
         reward_ensemble.train_ensemble(
-            pref_ds,
+            train_pref_ds,
+            val_pref_ds,
             device=device,
             epochs=REWARD_MODEL_EPOCHS,
             patience=REWARD_MODEL_PATIENCE,
@@ -285,7 +314,7 @@ def main():
         current_min_gap = INITIAL_MIN_GAP - (INITIAL_MIN_GAP - FINAL_MIN_GAP) * fraction_ppo_training_done
         current_min_gap = max(current_min_gap, FINAL_MIN_GAP)
         
-        print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{TOTAL_PPO_TIMESTEPS}, Using MIN_GAP: {current_min_gap:.2f}, Total Prefs: {len(pref_ds)}/{TOTAL_TARGET_PAIRS}")
+        print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{TOTAL_PPO_TIMESTEPS}, Using MIN_GAP: {current_min_gap:.2f}, Total Prefs: {len(train_pref_ds)+len(val_pref_ds)}/{TOTAL_TARGET_PAIRS}")
 
         policy.learn(
             total_timesteps=PPO_TIMESTEPS_PER_ITER,
@@ -320,12 +349,12 @@ def main():
         segment_rewards_for_plot = [clip_return(c) for c in new_segments]
         plot_rewards(segment_rewards_for_plot, results_dir, it, writer=writer)
 
-        rate_scaling_factor = REFERENCE_TIMESTEPS_FOR_RATE / (T_cumulative_ppo_steps_in_loop + REFERENCE_TIMESTEPS_FOR_RATE)
-        _target_pairs_for_iter = round(BASE_PAIRS_PER_ITERATION_SCALER * rate_scaling_factor)
-        _target_pairs_for_iter = max(1, _target_pairs_for_iter) # Ensure we try to collect at least 1 pair
-
-        remaining_needed_overall = TOTAL_TARGET_PAIRS - len(pref_ds)
-        target_pairs_this_iter = min(_target_pairs_for_iter, max(0, remaining_needed_overall)) 
+        num_iters_left = (TOTAL_PPO_TIMESTEPS - T_cumulative_ppo_steps_in_loop) / PPO_TIMESTEPS_PER_ITER
+        remaining_needed_overall = TOTAL_TARGET_PAIRS - len(train_pref_ds)
+        if num_iters_left > 0:
+            target_pairs_this_iter = max(0, round(remaining_needed_overall / num_iters_left))
+        else:
+            target_pairs_this_iter = 0
         new_prefs = []
 
         if target_pairs_this_iter > 0 and clips_ds:
@@ -381,12 +410,16 @@ def main():
                 #         plot_preference_heatmap(rewards_log, results_dir, it, range_min=-20, range_max=-2)
 
         for c1, c2, p in new_prefs:
-            pref_ds.add(c1, c2, p)
+            if random.random() < 0.8:
+                train_pref_ds.add(c1, c2, p)
+            else:
+                val_pref_ds.add(c1, c2, p)
 
         if args.random:
             reward_model, reward_logger_iteration = train_reward_model_batched(
                 reward_model,
-                pref_ds,
+                train_pref_ds,
+                val_pref_ds,
                 device=device,
                 epochs=50,
                 patience=7,
@@ -402,7 +435,8 @@ def main():
             plot_correlation_by_bin(clips_ds, reward_model, it, results_dir, writer=writer)
         else:
             reward_ensemble.train_ensemble(
-                pref_ds,
+                train_pref_ds,
+                val_pref_ds,
                 device=device,
                 epochs=REWARD_MODEL_EPOCHS,
                 patience=REWARD_MODEL_PATIENCE,
