@@ -167,7 +167,8 @@ def main():
     args = parser.parse_args()
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    experiment_type = "random" if args.random else "active"
+    # experiment_type = "random" if args.random else "active"
+    experiment_type = "active_bald" if USE_BALD else "random"
     results_dir = f"{env_id}_results_{timestamp}"
     os.makedirs(results_dir, exist_ok=True)
     print(f"Results will be saved in: {results_dir}")
@@ -368,6 +369,28 @@ def main():
             if args.random:
                 if T_cumulative_ppo_steps_in_loop < 10_000_000:
                     new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop, current_min_gap)
+
+                    if USE_BALD:
+                        print(f"Using BALD...")
+                        effective_bald_k = min(BALD_K, num_rand_iter_loop)
+                        cand_pairs = []
+                        if clips_ds:
+                            cand_pairs = select_active_pairs(
+                                clips_ds, reward_model,
+                                pool_size=num_rand_iter_loop,
+                                K=effective_bald_k, T=BALD_T,
+                                device=device,
+                                logger=policy.logger,
+                                iteration=reward_logger_iteration
+                            )
+                        if cand_pairs:
+                            _annotated_prefs, _, rewards_log = annotate_pairs(cand_pairs, min_gap=current_min_gap)
+                            new_prefs = _annotated_prefs
+                            print(f"Iteration {it}: BALD targeted {target_pairs_this_iter} (effective K {effective_bald_k}), selected {len(new_prefs)} pairs.")
+                        
+                            if rewards_log:
+                                plot_preference_heatmap(rewards_log, results_dir, it, range_min=-20, range_max=-2)
+
                 else:
                     new_prefs = select_high_variance_pairs(clips_ds, reward_ensemble, target_pairs_this_iter, current_min_gap)
                     print(f"Iteration {it}: Selected {len(new_prefs)} high-variance pairs using ensemble.")

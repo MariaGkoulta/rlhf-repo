@@ -22,6 +22,7 @@ INITIAL_MIN_GAP = 0.25
 FINAL_MIN_GAP = 0.25
 NUM_BINS = 120
 BALD_POOL_SIZE = 50000
+USE_BALD = False
 BALD_K = 10000
 BALD_T = 10
 # Scales the number of pairs collected per iteration based on the rate.
