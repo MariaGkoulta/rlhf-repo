@@ -152,73 +152,62 @@ def linear_schedule(initial_value: float):
 
     return func
 
-def main():
-
-    env_id = ENV_ID
-
-    parser = argparse.ArgumentParser(
-        description=f"Train PPO on {env_id} with random or BALD-based preference sampling"
-    )
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--random", action="store_true",
-                       help="sample preference pairs uniformly at random")
-    group.add_argument("--active", action="store_true",
-                       help="sample preference pairs via BALD active learning")
-    args = parser.parse_args()
-
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    # experiment_type = "random" if args.random else "active"
-    experiment_type = "active_bald" if USE_BALD else "random"
-    results_dir = f"{env_id}_results_{timestamp}"
-    os.makedirs(results_dir, exist_ok=True)
-    print(f"Results will be saved in: {results_dir}")
-
-    config_src = os.path.join(os.path.dirname(__file__), "hopper_config.py")
-    config_dst = os.path.join(results_dir, "hopper_config.py")
-    shutil.copyfile(config_src, config_dst)
-
-    # Create a shared parent directory for all runs of this environment
-    shared_log_dir = f"./logs/{env_id}/"
-    # Create a unique subdirectory for this specific run with experiment type
-    run_log_dir = f"{shared_log_dir}{experiment_type}_{timestamp}/"
-    
-    tensorboard_log_dir = run_log_dir
-    writer = SummaryWriter(log_dir=tensorboard_log_dir)
-
+def run_training(
+    env_id,
+    results_dir,
+    run_log_dir,
+    use_random_sampling,
+    # Hyperparameters from config
+    ppo_lr, ppo_n_steps, ppo_batch_size, ppo_ent_coef, ppo_n_epochs,
+    initial_policy_ts, total_ppo_timesteps, ppo_timesteps_per_iter,
+    ppo_training_patience,
+    rm_lr, rm_weight_decay, rm_reg_weight, rm_epochs, rm_patience,
+    rm_dropout_prob,
+    reward_ensembles,
+    use_bald, bald_k, bald_t,
+    total_target_pairs, initial_collection_fraction,
+    num_episodes_to_collect_initial, num_episodes_to_collect_per_update,
+    extract_segments, segment_len, initial_segment_len, final_segment_len,
+    target_num_segments_if_extracting_initial,
+    target_num_segments_if_extracting_per_update,
+    initial_min_gap, final_min_gap,
+    max_episode_steps, normalize_rewards, terminate_when_unhealthy
+):
+    writer = SummaryWriter(log_dir=run_log_dir)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    train_pref_ds = PreferenceDataset(device=device, segment_len=FINAL_SEGMENT_LEN)
-    val_pref_ds = PreferenceDataset(device=device, segment_len=FINAL_SEGMENT_LEN)
+    train_pref_ds = PreferenceDataset(device=device, segment_len=final_segment_len)
+    val_pref_ds = PreferenceDataset(device=device, segment_len=final_segment_len)
 
     raw_env = None
     if env_id in UNHEALTHY_TERMINATION_ENVS:
         print(f"Setting unhealthy termination to false for {env_id}.")
-        raw_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=MAX_EPISODE_STEPS, terminate_when_unhealthy=False)
+        raw_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=max_episode_steps, terminate_when_unhealthy=False)
     else:
-        raw_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=MAX_EPISODE_STEPS)
+        raw_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=max_episode_steps)
     wrapped_base_raw_env = NoSeedArgumentWrapper(raw_env)
-    time_limited_raw_env = TimeLimit(wrapped_base_raw_env, max_episode_steps=MAX_EPISODE_STEPS)
+    time_limited_raw_env = TimeLimit(wrapped_base_raw_env, max_episode_steps=max_episode_steps)
     policy = PPO(
         "MlpPolicy",
         time_limited_raw_env,
         verbose=1,
-        n_steps=PPO_N_STEPS,
-        batch_size=PPO_BATCH_SIZE,
-        ent_coef=PPO_ENT_COEF,
-        n_epochs=PPO_N_EPOCHS,
-        learning_rate=PPO_LR,
+        n_steps=ppo_n_steps,
+        batch_size=ppo_batch_size,
+        ent_coef=ppo_ent_coef,
+        n_epochs=ppo_n_epochs,
+        learning_rate=ppo_lr,
         tensorboard_log=run_log_dir
     )
-    policy.learn(total_timesteps=INITIAL_POLICY_TS)
+    policy.learn(total_timesteps=initial_policy_ts)
     time_limited_raw_env.close()
 
-    initial_full_episodes = collect_clips(policy, NUM_EPISODES_TO_COLLECT_INITIAL, env_id=env_id, max_episode_steps=MAX_EPISODE_STEPS)
+    initial_full_episodes = collect_clips(policy, num_episodes_to_collect_initial, env_id=env_id, max_episode_steps=max_episode_steps)
     clips_ds = []
-    if EXTRACT_SEGMENTS:
+    if extract_segments:
         clips_ds = extract_segments_from_episodes(
             initial_full_episodes,
-            segment_len=SEGMENT_LEN,
+            segment_len=segment_len,
             extract_multiple_segments=True,
-            target_num_segments_if_multiple=TARGET_NUM_SEGMENTS_IF_EXTRACTING_INITIAL
+            target_num_segments_if_multiple=target_num_segments_if_extracting_initial
     )
     else:
         clips_ds = initial_full_episodes
@@ -226,10 +215,10 @@ def main():
     for i, episode_data in enumerate(initial_full_episodes):
         print(f"  Initial Episode {i+1} length: {len(episode_data['acts'])}")
 
-    initial_target_pairs = int(TOTAL_TARGET_PAIRS * INITIAL_COLLECTION_FRACTION)
+    initial_target_pairs = int(total_target_pairs * initial_collection_fraction)
     print(f"Targeting {initial_target_pairs} initial preference pairs.")
 
-    current_min_gap = INITIAL_MIN_GAP
+    current_min_gap = initial_min_gap
     print(f"Initial preference generation with MIN_GAP: {current_min_gap}")
 
     clip_rewards = [clip_return(c) for c in clips_ds]
@@ -260,32 +249,36 @@ def main():
     act_dim = policy.action_space.shape[0]
     reward_logger_iteration = 0
 
-    if args.random:
-        reward_model = RewardModel(obs_dim, act_dim, dropout_prob=REWARD_MODEL_DROPOUT_PROB)
-        optimizer = torch.optim.Adam(reward_model.parameters(), lr=REWARD_MODEL_LEARNING_RATE, weight_decay=REWARD_MODEL_WEIGHT_DECAY)
+    reward_model = None
+    reward_ensemble = None
+    optimizer = None
+
+    if use_random_sampling:
+        reward_model = RewardModel(obs_dim, act_dim, dropout_prob=rm_dropout_prob)
+        optimizer = torch.optim.Adam(reward_model.parameters(), lr=rm_lr, weight_decay=rm_weight_decay)
         reward_model, reward_logger_iteration = train_reward_model_batched(
             reward_model,
             train_pref_ds,
             val_pref_ds,
             device=device,
-            epochs=REWARD_MODEL_EPOCHS,
-            patience=REWARD_MODEL_PATIENCE,
+            epochs=rm_epochs,
+            patience=rm_patience,
             optimizer=optimizer,
-            regularization_weight=REWARD_MODEL_REGULARIZATION_WEIGHT,
+            regularization_weight=rm_reg_weight,
             logger=policy.logger,
             iteration=reward_logger_iteration
         )
     else: 
-        reward_ensemble = RewardEnsemble(obs_dim, act_dim, num_models=REWARD_ENSEMBLES, dropout_prob=REWARD_MODEL_DROPOUT_PROB)
+        reward_ensemble = RewardEnsemble(obs_dim, act_dim, num_models=reward_ensembles, dropout_prob=rm_dropout_prob)
         reward_ensemble.train_ensemble(
             train_pref_ds,
             val_pref_ds,
             device=device,
-            epochs=REWARD_MODEL_EPOCHS,
-            patience=REWARD_MODEL_PATIENCE,
-            optimizer_lr=REWARD_MODEL_LEARNING_RATE,
-            optimizer_wd=REWARD_MODEL_WEIGHT_DECAY,
-            regularization_weight=REWARD_MODEL_REGULARIZATION_WEIGHT,
+            epochs=rm_epochs,
+            patience=rm_patience,
+            optimizer_lr=rm_lr,
+            optimizer_wd=rm_weight_decay,
+            regularization_weight=rm_reg_weight,
             logger=policy.logger,
             iteration=reward_logger_iteration
         )
@@ -293,55 +286,55 @@ def main():
     def make_wrapped():
         if env_id in UNHEALTHY_TERMINATION_ENVS:
             print(f"Setting unhealthy termination to false for {env_id}.")
-            base_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=MAX_EPISODE_STEPS, terminate_when_unhealthy=False)
+            base_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=max_episode_steps, terminate_when_unhealthy=False)
         else:
-            base_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=MAX_EPISODE_STEPS)
+            base_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=max_episode_steps)
         wrapped_base_raw_env = NoSeedArgumentWrapper(base_env)
-        e_time_limited = TimeLimit(wrapped_base_raw_env, max_episode_steps=MAX_EPISODE_STEPS)
+        e_time_limited = TimeLimit(wrapped_base_raw_env, max_episode_steps=max_episode_steps)
         e_monitored = Monitor(e_time_limited)
 
-        if args.random:
-            return LearnedRewardEnv(e_monitored, reward_model, normalize_rewards=NORMALIZE_REWARDS)
+        if use_random_sampling:
+            return LearnedRewardEnv(e_monitored, reward_model, normalize_rewards=normalize_rewards)
         else:
-            return LearnedRewardEnv(e_monitored, reward_ensemble, normalize_rewards=NORMALIZE_REWARDS)
+            return LearnedRewardEnv(e_monitored, reward_ensemble, normalize_rewards=normalize_rewards)
 
     vec_env = DummyVecEnv([make_wrapped])
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False, gamma=policy.gamma)
     vec_env = VecMonitor(vec_env)
     policy.set_env(vec_env)
-    callback = TrueRewardCallback(patience=PPO_TRAINING_PATIENCE, verbose=1)
+    callback = TrueRewardCallback(patience=ppo_training_patience, verbose=1)
 
     it = 0
     T_cumulative_ppo_steps_in_loop = 0
 
-    while T_cumulative_ppo_steps_in_loop < TOTAL_PPO_TIMESTEPS:
+    while T_cumulative_ppo_steps_in_loop < total_ppo_timesteps:
         it += 1
         
-        fraction_ppo_training_done = min(1.0, max(0.0, T_cumulative_ppo_steps_in_loop / TOTAL_PPO_TIMESTEPS))
-        current_min_gap = INITIAL_MIN_GAP - (INITIAL_MIN_GAP - FINAL_MIN_GAP) * fraction_ppo_training_done
-        current_min_gap = max(current_min_gap, FINAL_MIN_GAP)
+        fraction_ppo_training_done = min(1.0, max(0.0, T_cumulative_ppo_steps_in_loop / total_ppo_timesteps))
+        current_min_gap = initial_min_gap - (initial_min_gap - final_min_gap) * fraction_ppo_training_done
+        current_min_gap = max(current_min_gap, final_min_gap)
         
-        print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{TOTAL_PPO_TIMESTEPS}, Using MIN_GAP: {current_min_gap:.2f}, Total Prefs: {len(train_pref_ds)+len(val_pref_ds)}/{TOTAL_TARGET_PAIRS}")
+        print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{total_ppo_timesteps}, Using MIN_GAP: {current_min_gap:.2f}, Total Prefs: {len(train_pref_ds)+len(val_pref_ds)}/{total_target_pairs}")
 
         policy.learn(
-            total_timesteps=PPO_TIMESTEPS_PER_ITER,
+            total_timesteps=ppo_timesteps_per_iter,
             reset_num_timesteps=False,
             callback=callback
         )
 
-        T_cumulative_ppo_steps_in_loop += PPO_TIMESTEPS_PER_ITER
+        T_cumulative_ppo_steps_in_loop += ppo_timesteps_per_iter
 
-        current_segment_len = int(INITIAL_SEGMENT_LEN + (FINAL_SEGMENT_LEN - INITIAL_SEGMENT_LEN) * fraction_ppo_training_done)
+        current_segment_len = int(initial_segment_len + (final_segment_len - initial_segment_len) * fraction_ppo_training_done)
         policy.logger.record("params/segment_length", current_segment_len)
         print(f"Current segment length: {current_segment_len}")
 
         # collect new clips
-        new_full_episodes = collect_clips(policy, NUM_EPISODES_TO_COLLECT_PER_UPDATE, env_id=env_id, max_episode_steps=MAX_EPISODE_STEPS)
+        new_full_episodes = collect_clips(policy, num_episodes_to_collect_per_update, env_id=env_id, max_episode_steps=max_episode_steps)
         new_segments = extract_segments_from_episodes(
             new_full_episodes,
             current_segment_len,
-            EXTRACT_SEGMENTS,
-            TARGET_NUM_SEGMENTS_IF_EXTRACTING_PER_UPDATE if EXTRACT_SEGMENTS else None
+            extract_segments,
+            target_num_segments_if_extracting_per_update if extract_segments else None
         )
         clips_ds.extend(new_segments)
 
@@ -356,8 +349,8 @@ def main():
         segment_rewards_for_plot = [clip_return(c) for c in new_segments]
         plot_rewards(segment_rewards_for_plot, results_dir, it, writer=writer)
 
-        num_iters_left = (TOTAL_PPO_TIMESTEPS - T_cumulative_ppo_steps_in_loop) / PPO_TIMESTEPS_PER_ITER
-        remaining_needed_overall = TOTAL_TARGET_PAIRS - len(train_pref_ds)
+        num_iters_left = (total_ppo_timesteps - T_cumulative_ppo_steps_in_loop) / ppo_timesteps_per_iter
+        remaining_needed_overall = total_target_pairs - len(train_pref_ds)
         if num_iters_left > 0:
             target_pairs_this_iter = max(0, round(remaining_needed_overall / num_iters_left))
         else:
@@ -366,19 +359,19 @@ def main():
 
         if target_pairs_this_iter > 0 and clips_ds:
             num_rand_iter_loop = target_pairs_this_iter
-            if args.random:
+            if use_random_sampling:
                 if T_cumulative_ppo_steps_in_loop < 10_000_000:
                     new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop, current_min_gap)
 
-                    if USE_BALD:
+                    if use_bald:
                         print(f"Using BALD...")
-                        effective_bald_k = min(BALD_K, num_rand_iter_loop)
+                        effective_bald_k = min(bald_k, num_rand_iter_loop)
                         cand_pairs = []
                         if clips_ds:
                             cand_pairs = select_active_pairs(
                                 clips_ds, reward_model,
                                 pool_size=num_rand_iter_loop,
-                                K=effective_bald_k, T=BALD_T,
+                                K=effective_bald_k, T=bald_t,
                                 device=device,
                                 logger=policy.logger,
                                 iteration=reward_logger_iteration
@@ -444,7 +437,7 @@ def main():
             else:
                 val_pref_ds.add(c1, c2, p)
 
-        if args.random:
+        if use_random_sampling:
             reward_model, reward_logger_iteration = train_reward_model_batched(
                 reward_model,
                 train_pref_ds,
@@ -453,7 +446,7 @@ def main():
                 epochs=50,
                 patience=7,
                 optimizer=optimizer,
-                regularization_weight=REWARD_MODEL_REGULARIZATION_WEIGHT,
+                regularization_weight=rm_reg_weight,
                 logger=policy.logger,
                 iteration=reward_logger_iteration
             )
@@ -467,11 +460,11 @@ def main():
                 train_pref_ds,
                 val_pref_ds,
                 device=device,
-                epochs=REWARD_MODEL_EPOCHS,
-                patience=REWARD_MODEL_PATIENCE,
-                optimizer_lr=REWARD_MODEL_LEARNING_RATE,
-                optimizer_wd=REWARD_MODEL_WEIGHT_DECAY,
-                regularization_weight=REWARD_MODEL_REGULARIZATION_WEIGHT,
+                epochs=rm_epochs,
+                patience=rm_patience,
+                optimizer_lr=rm_lr,
+                optimizer_wd=rm_weight_decay,
+                regularization_weight=rm_reg_weight,
                 logger=policy.logger,
                 iteration=reward_logger_iteration
             )
@@ -481,9 +474,11 @@ def main():
             policy.save(os.path.join(results_dir, f"ppo_{env_id}_iter_{it}.zip"))
             torch.save(reward_ensemble.state_dict(), os.path.join(results_dir, f"rm_iter_{it}.pth"))
 
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     policy.save(os.path.join(results_dir, f"ppo_final_{timestamp}.zip"))
+    final_model = reward_ensemble if not use_random_sampling else reward_model
     torch.save(
-        reward_ensemble.state_dict(),
+        final_model.state_dict(),
         os.path.join(results_dir, f"rm_final_{timestamp}.pth")
     )
 
@@ -491,21 +486,100 @@ def main():
     os.makedirs(video_folder, exist_ok=True)
     eval_env = None
     if env_id in UNHEALTHY_TERMINATION_ENVS:
-        eval_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=MAX_EPISODE_STEPS, terminate_when_unhealthy=False)
+        eval_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=max_episode_steps, terminate_when_unhealthy=False)
     else:
-        eval_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=MAX_EPISODE_STEPS)
+        eval_env = gym.make(env_id, render_mode="rgb_array", max_episode_steps=max_episode_steps)
     eval_env = gym.wrappers.RecordVideo(
         eval_env, video_folder, episode_trigger=lambda e: e == 0,
         name_prefix=f"final-{env_id}-eval"
     )
-    obs, _ = eval_env.reset()
-    done = False
-    while not done:
-        action, _ = policy.predict(obs, deterministic=True)
-        obs, _, term, trunc, _ = eval_env.step(action)
-        done = term or trunc
+    total_reward = 0
+    num_eval_episodes = 10
+    for _ in range(num_eval_episodes):
+        obs, _ = eval_env.reset()
+        done = False
+        episode_reward = 0
+        while not done:
+            action, _ = policy.predict(obs, deterministic=True)
+            obs, reward, term, trunc, _ = eval_env.step(action)
+            episode_reward += reward
+            done = term or trunc
+        total_reward += episode_reward
+
+    mean_reward = total_reward / num_eval_episodes
+    print(f"Final evaluation mean reward: {mean_reward}")
+    
     eval_env.close()
     print(f"Video saved to {video_folder}/")
+    return mean_reward
+
+def main():
+
+    env_id = ENV_ID
+
+    parser = argparse.ArgumentParser(
+        description=f"Train PPO on {env_id} with random or BALD-based preference sampling"
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--random", action="store_true",
+                       help="sample preference pairs uniformly at random")
+    group.add_argument("--active", action="store_true",
+                       help="sample preference pairs via BALD active learning")
+    args = parser.parse_args()
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_type = "active_bald" if USE_BALD else "random"
+    results_dir = f"{env_id}_results_{timestamp}"
+    os.makedirs(results_dir, exist_ok=True)
+    print(f"Results will be saved in: {results_dir}")
+
+    config_src = os.path.join(os.path.dirname(__file__), "cheetah_config.py")
+    config_dst = os.path.join(results_dir, "cheetah_config.py")
+    shutil.copyfile(config_src, config_dst)
+
+    shared_log_dir = f"./logs/{env_id}/"
+    run_log_dir = f"{shared_log_dir}{experiment_type}_{timestamp}/"
+    
+    run_training(
+        env_id=env_id,
+        results_dir=results_dir,
+        run_log_dir=run_log_dir,
+        use_random_sampling=args.random,
+        ppo_lr=PPO_LR,
+        ppo_n_steps=PPO_N_STEPS,
+        ppo_batch_size=PPO_BATCH_SIZE,
+        ppo_ent_coef=PPO_ENT_COEF,
+        ppo_n_epochs=PPO_N_EPOCHS,
+        initial_policy_ts=INITIAL_POLICY_TS,
+        total_ppo_timesteps=TOTAL_PPO_TIMESTEPS,
+        ppo_timesteps_per_iter=PPO_TIMESTEPS_PER_ITER,
+        ppo_training_patience=PPO_TRAINING_PATIENCE,
+        rm_lr=REWARD_MODEL_LEARNING_RATE,
+        rm_weight_decay=REWARD_MODEL_WEIGHT_DECAY,
+        rm_reg_weight=REWARD_MODEL_REGULARIZATION_WEIGHT,
+        rm_epochs=REWARD_MODEL_EPOCHS,
+        rm_patience=REWARD_MODEL_PATIENCE,
+        rm_dropout_prob=REWARD_MODEL_DROPOUT_PROB,
+        reward_ensembles=REWARD_ENSEMBLES,
+        use_bald=USE_BALD,
+        bald_k=BALD_K,
+        bald_t=BALD_T,
+        total_target_pairs=TOTAL_TARGET_PAIRS,
+        initial_collection_fraction=INITIAL_COLLECTION_FRACTION,
+        num_episodes_to_collect_initial=NUM_EPISODES_TO_COLLECT_INITIAL,
+        num_episodes_to_collect_per_update=NUM_EPISODES_TO_COLLECT_PER_UPDATE,
+        extract_segments=EXTRACT_SEGMENTS,
+        segment_len=SEGMENT_LEN,
+        initial_segment_len=INITIAL_SEGMENT_LEN,
+        final_segment_len=FINAL_SEGMENT_LEN,
+        target_num_segments_if_extracting_initial=TARGET_NUM_SEGMENTS_IF_EXTRACTING_INITIAL,
+        target_num_segments_if_extracting_per_update=TARGET_NUM_SEGMENTS_IF_EXTRACTING_PER_UPDATE,
+        initial_min_gap=INITIAL_MIN_GAP,
+        final_min_gap=FINAL_MIN_GAP,
+        max_episode_steps=MAX_EPISODE_STEPS,
+        normalize_rewards=NORMALIZE_REWARDS,
+        terminate_when_unhealthy=TERMINATE_WHEN_UNHEALTHY
+    )
 
 
 if __name__ == "__main__":
