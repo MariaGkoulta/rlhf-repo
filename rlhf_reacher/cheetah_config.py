@@ -22,7 +22,6 @@ INITIAL_MIN_GAP = 0.25
 FINAL_MIN_GAP = 0.25
 NUM_BINS = 120
 BALD_POOL_SIZE = 50000
-USE_BALD = False
 BALD_K = 10000
 BALD_T = 10
 # Scales the number of pairs collected per iteration based on the rate.
@@ -50,4 +49,8 @@ REWARD_MODEL_EPOCHS = 100
 REWARD_MODEL_PATIENCE = 10
 REWARD_MODEL_DROPOUT_PROB = 0.2
 REWARD_ENSEMBLES = 5
-USE_REWARD_ENSEMBLES = True
+
+# Feedback type configuration
+FEEDBACK_TYPE = "evaluative"  # Options: "preference", "evaluative"
+EVALUATIVE_RATING_BINS = 10  # Number of rating bins for evaluative feedback (1-10)
+DISCOUNT_FACTOR = 0.99  # Gamma for discounted return calculation

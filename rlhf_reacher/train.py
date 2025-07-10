@@ -23,7 +23,7 @@ from bald import select_active_pairs
 from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred
 from custom_env import LearnedRewardEnv
 from reward_ensemble import RewardEnsemble, select_high_variance_pairs
-
+from evaluative import EvaluativeDataset, annotate_evaluative
 
 from preferences import (
     UPPER_BIN, PreferenceDataset, annotate_preferences, clip_return,
@@ -36,7 +36,7 @@ from custom_env import LearnedRewardEnv
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
 from torch.utils.tensorboard import SummaryWriter
-from cheetah_config import *
+from hopper_config import *
 import shutil
 
 def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50):
@@ -133,7 +133,22 @@ def sample_random_preferences(clips, num_samples, min_gap):
         if abs(sum(c1["rews"]) - sum(c2["rews"])) >= min_gap:
             cand_pairs.append((c1, c2))
     prefs, _, _ = annotate_pairs(cand_pairs, min_gap=min_gap)
-    return prefs    
+    return prefs
+
+def sample_evaluative_data(clips, num_samples):
+    """Sample clips for evaluative feedback annotation."""
+    if len(clips) < num_samples:
+        selected_clips = clips
+    else:
+        selected_clips = random.sample(clips, num_samples)
+    
+    # Annotate with evaluative ratings
+    evaluative_data, _, _ = annotate_evaluative(
+        selected_clips, 
+        num_bins=EVALUATIVE_RATING_BINS, 
+        discount_factor=DISCOUNT_FACTOR
+    )
+    return evaluative_data
 
 def linear_schedule(initial_value: float):
     """
@@ -163,7 +178,7 @@ def run_training(
     ppo_training_patience,
     rm_lr, rm_weight_decay, rm_reg_weight, rm_epochs, rm_patience,
     rm_dropout_prob,
-    reward_ensembles,
+    use_ensemble, reward_ensembles,
     use_bald, bald_k, bald_t,
     total_target_pairs, initial_collection_fraction,
     num_episodes_to_collect_initial, num_episodes_to_collect_per_update,
@@ -175,8 +190,19 @@ def run_training(
 ):
     writer = SummaryWriter(log_dir=run_log_dir)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    train_pref_ds = PreferenceDataset(device=device, segment_len=final_segment_len)
-    val_pref_ds = PreferenceDataset(device=device, segment_len=final_segment_len)
+
+    if FEEDBACK_TYPE == "preference":
+        train_pref_ds = PreferenceDataset(device=device, segment_len=final_segment_len)
+        val_pref_ds = PreferenceDataset(device=device, segment_len=final_segment_len)
+        train_dataset = train_pref_ds
+        val_dataset = val_pref_ds
+    elif FEEDBACK_TYPE == "evaluative":
+        train_eval_ds = EvaluativeDataset(device=device, segment_len=final_segment_len)
+        val_eval_ds = EvaluativeDataset(device=device, segment_len=final_segment_len)
+        train_dataset = train_eval_ds
+        val_dataset = val_eval_ds
+    else:
+        raise ValueError(f"Unsupported feedback type: {FEEDBACK_TYPE}")
 
     raw_env = None
     if env_id in UNHEALTHY_TERMINATION_ENVS:
@@ -216,34 +242,51 @@ def run_training(
         print(f"  Initial Episode {i+1} length: {len(episode_data['acts'])}")
 
     initial_target_pairs = int(total_target_pairs * initial_collection_fraction)
-    print(f"Targeting {initial_target_pairs} initial preference pairs.")
+    print(f"Targeting {initial_target_pairs} initial {FEEDBACK_TYPE} data points.")
 
     current_min_gap = initial_min_gap
-    print(f"Initial preference generation with MIN_GAP: {current_min_gap}")
+    print(f"Initial {FEEDBACK_TYPE} generation with MIN_GAP: {current_min_gap}")
 
     clip_rewards = [clip_return(c) for c in clips_ds]
     plot_rewards(clip_rewards, results_dir, it=0, writer=writer)
 
-    num_rand_initial = initial_target_pairs
-    print(f"Initial collection (random): targeting num_rand_initial = {num_rand_initial}")
-    if len(clips_ds) >= 2: 
-            _prefs_list = sample_random_preferences(clips_ds, num_rand_initial, current_min_gap) # Use calculated value
-            prefs = _prefs_list
-    else:
-        print(f"Initial collection (random): clips_ds has fewer than 2 segments ({len(clips_ds)}). Cannot sample pairs.")
+    if FEEDBACK_TYPE == "preference":
+        num_rand_initial = initial_target_pairs
+        print(f"Initial collection (random): targeting num_rand_initial = {num_rand_initial}")
+        if len(clips_ds) >= 2: 
+                _prefs_list = sample_random_preferences(clips_ds, num_rand_initial, current_min_gap) # Use calculated value
+                prefs = _prefs_list
+        else:
+            print(f"Initial collection (random): clips_ds has fewer than 2 segments ({len(clips_ds)}). Cannot sample pairs.")
 
-    print(f"Generated {len(prefs)} initial preference pairs.")
-    random.shuffle(prefs)
-    val_split_idx = int(len(prefs) * 0.2)
-    val_prefs = prefs[:val_split_idx]
-    train_prefs = prefs[val_split_idx:]
+        print(f"Generated {len(prefs)} initial preference pairs.")
+        random.shuffle(prefs)
+        val_split_idx = int(len(prefs) * 0.2)
+        val_prefs = prefs[:val_split_idx]
+        train_prefs = prefs[val_split_idx:]
 
-    for c1, c2, p in train_prefs:
-        train_pref_ds.add(c1, c2, p)
-    for c1, c2, p in val_prefs:
-        val_pref_ds.add(c1, c2, p)
+        for c1, c2, p in train_prefs:
+            train_pref_ds.add(c1, c2, p)
+        for c1, c2, p in val_prefs:
+            val_pref_ds.add(c1, c2, p)
+        
+        print(f"Split initial preferences into {len(train_pref_ds)} training and {len(val_pref_ds)} validation pairs.")
     
-    print(f"Split initial preferences into {len(train_pref_ds)} training and {len(val_pref_ds)} validation pairs.")
+    elif FEEDBACK_TYPE == "evaluative":
+        evaluative_data = sample_evaluative_data(clips_ds, initial_target_pairs)
+        print(f"Generated {len(evaluative_data)} initial evaluative data points.")
+        
+        random.shuffle(evaluative_data)
+        val_split_idx = int(len(evaluative_data) * 0.2)
+        val_eval_data = evaluative_data[:val_split_idx]
+        train_eval_data = evaluative_data[val_split_idx:]
+
+        for clip, rating in train_eval_data:
+            train_eval_ds.add(clip, rating)
+        for clip, rating in val_eval_data:
+            val_eval_ds.add(clip, rating)
+        
+        print(f"Split initial evaluative data into {len(train_eval_ds)} training and {len(val_eval_ds)} validation samples.")
 
     obs_dim = policy.observation_space.shape[0]
     act_dim = policy.action_space.shape[0]
@@ -258,21 +301,22 @@ def run_training(
         optimizer = torch.optim.Adam(reward_model.parameters(), lr=rm_lr, weight_decay=rm_weight_decay)
         reward_model, reward_logger_iteration = train_reward_model_batched(
             reward_model,
-            train_pref_ds,
-            val_pref_ds,
+            train_dataset,
+            val_dataset,
             device=device,
             epochs=rm_epochs,
             patience=rm_patience,
             optimizer=optimizer,
             regularization_weight=rm_reg_weight,
             logger=policy.logger,
-            iteration=reward_logger_iteration
+            iteration=reward_logger_iteration,
+            feedback_type=FEEDBACK_TYPE
         )
     else: 
         reward_ensemble = RewardEnsemble(obs_dim, act_dim, num_models=reward_ensembles, dropout_prob=rm_dropout_prob)
         reward_ensemble.train_ensemble(
-            train_pref_ds,
-            val_pref_ds,
+            train_dataset,
+            val_dataset,
             device=device,
             epochs=rm_epochs,
             patience=rm_patience,
@@ -280,7 +324,8 @@ def run_training(
             optimizer_wd=rm_weight_decay,
             regularization_weight=rm_reg_weight,
             logger=policy.logger,
-            iteration=reward_logger_iteration
+            iteration=reward_logger_iteration,
+            feedback_type=FEEDBACK_TYPE
         )
 
     def make_wrapped():
@@ -314,8 +359,11 @@ def run_training(
         current_min_gap = initial_min_gap - (initial_min_gap - final_min_gap) * fraction_ppo_training_done
         current_min_gap = max(current_min_gap, final_min_gap)
         
-        print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{total_ppo_timesteps}, Using MIN_GAP: {current_min_gap:.2f}, Total Prefs: {len(train_pref_ds)+len(val_pref_ds)}/{total_target_pairs}")
-
+        if FEEDBACK_TYPE == "preference":
+            print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{total_ppo_timesteps}, Using MIN_GAP: {current_min_gap:.2f}, Total Prefs: {len(train_dataset)+len(val_dataset)}/{total_target_pairs}")
+        else:
+            print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{total_ppo_timesteps}, Total Evaluative Data: {len(train_dataset)+len(val_dataset)}/{total_target_pairs}")
+        
         policy.learn(
             total_timesteps=ppo_timesteps_per_iter,
             reset_num_timesteps=False,
@@ -350,105 +398,77 @@ def run_training(
         plot_rewards(segment_rewards_for_plot, results_dir, it, writer=writer)
 
         num_iters_left = (total_ppo_timesteps - T_cumulative_ppo_steps_in_loop) / ppo_timesteps_per_iter
-        remaining_needed_overall = total_target_pairs - len(train_pref_ds)
+        remaining_needed_overall = total_target_pairs - len(train_dataset)
         if num_iters_left > 0:
-            target_pairs_this_iter = max(0, round(remaining_needed_overall / num_iters_left))
+            target_points_this_iter = max(0, round(remaining_needed_overall / num_iters_left))
         else:
-            target_pairs_this_iter = 0
+            target_points_this_iter = 0
         new_prefs = []
 
-        if target_pairs_this_iter > 0 and clips_ds:
-            num_rand_iter_loop = target_pairs_this_iter
-            if use_random_sampling:
-                if T_cumulative_ppo_steps_in_loop < 10_000_000:
+        if FEEDBACK_TYPE == "preference":
+            if target_points_this_iter > 0 and clips_ds:
+                num_rand_iter_loop = target_points_this_iter
+        
+                if use_random_sampling:
                     new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop, current_min_gap)
+                    print(f"Iteration {it}: sampled {len(new_prefs)}.")
 
-                    if use_bald:
-                        print(f"Using BALD...")
-                        effective_bald_k = min(bald_k, num_rand_iter_loop)
-                        cand_pairs = []
-                        if clips_ds:
-                            cand_pairs = select_active_pairs(
-                                clips_ds, reward_model,
-                                pool_size=num_rand_iter_loop,
-                                K=effective_bald_k, T=bald_t,
-                                device=device,
-                                logger=policy.logger,
-                                iteration=reward_logger_iteration
-                            )
-                        if cand_pairs:
-                            _annotated_prefs, _, rewards_log = annotate_pairs(cand_pairs, min_gap=current_min_gap)
-                            new_prefs = _annotated_prefs
-                            print(f"Iteration {it}: BALD targeted {target_pairs_this_iter} (effective K {effective_bald_k}), selected {len(new_prefs)} pairs.")
-                        
-                            if rewards_log:
-                                plot_preference_heatmap(rewards_log, results_dir, it, range_min=-20, range_max=-2)
+                if use_bald:
+                    print(f"Using BALD for active learning...")
+                    effective_bald_k = min(bald_k, num_rand_iter_loop)
+                    cand_pairs = []
+                    if clips_ds:
+                        cand_pairs = select_active_pairs(
+                            clips_ds, reward_model,
+                            pool_size=num_rand_iter_loop,
+                            K=effective_bald_k, T=bald_t,
+                            device=device,
+                            logger=policy.logger,
+                            iteration=reward_logger_iteration
+                        )
+                    if cand_pairs:
+                        _annotated_prefs, _, rewards_log = annotate_pairs(cand_pairs, min_gap=current_min_gap)
+                        new_prefs = _annotated_prefs
+                        print(f"Iteration {it}: BALD targeted {target_points_this_iter} (effective K {effective_bald_k}), selected {len(new_prefs)} pairs.")
 
-                else:
-                    new_prefs = select_high_variance_pairs(clips_ds, reward_ensemble, target_pairs_this_iter, current_min_gap)
+                        if rewards_log:
+                            plot_preference_heatmap(rewards_log, results_dir, it, range_min=-20, range_max=-2)
+
+                    print(f"Iteration {it}: Targeted {target_points_this_iter} bald pairs, sampled {len(new_prefs)}.")
+        
+                if use_ensemble:
+                    print(f"Using ensemble for active learning...")
+                    new_prefs = select_high_variance_pairs(clips_ds, reward_ensemble, target_points_this_iter, current_min_gap)
                     print(f"Iteration {it}: Selected {len(new_prefs)} high-variance pairs using ensemble.")
-                    # print(f"Using BALD...")
-                    # effective_bald_k = min(BALD_K, num_rand_iter_loop)
-                    # cand_pairs = []
-                    # if clips_ds:
-                    #     cand_pairs = select_active_pairs(
-                    #         clips_ds, reward_model,
-                    #         pool_size=num_rand_iter_loop,
-                    #         K=effective_bald_k, T=BALD_T,
-                    #         device=device,
-                    #         logger=policy.logger,
-                    #         iteration=reward_logger_iteration
-                    #     )
-                    # if cand_pairs:
-                    #     _annotated_prefs, _, rewards_log = annotate_pairs(cand_pairs, min_gap=current_min_gap)
-                    #     new_prefs = _annotated_prefs
-                    #     print(f"Iteration {it}: BALD targeted {target_pairs_this_iter} (effective K {effective_bald_k}), selected {len(new_prefs)} pairs.")
-                    
-                    #     if rewards_log:
-                    #         plot_preference_heatmap(rewards_log, results_dir, it, range_min=-20, range_max=-2)
 
-                print(f"Iteration {it}: Targeted {target_pairs_this_iter} random pairs, sampled {len(new_prefs)}.")
-            else:
-                new_prefs = select_high_variance_pairs(clips_ds, reward_ensemble, target_pairs_this_iter, current_min_gap)
-                print(f"Iteration {it}: Selected {len(new_prefs)} high-variance pairs using ensemble.")
-                # print(f"Using BALD...")
-                # effective_bald_k = min(BALD_K, num_rand_iter_loop)
-                # cand_pairs = []
-                # if clips_ds:
-                #     cand_pairs = select_active_pairs(
-                #         clips_ds, reward_model,
-                #         pool_size=num_rand_iter_loop,
-                #         K=effective_bald_k, T=BALD_T,
-                #         device=device,
-                #         logger=policy.logger,
-                #         iteration=reward_logger_iteration
-                #     )
-                # if cand_pairs:
-                #     _annotated_prefs, _, rewards_log = annotate_pairs(cand_pairs, min_gap=current_min_gap)
-                #     new_prefs = _annotated_prefs
-                #     print(f"Iteration {it}: BALD targeted {target_pairs_this_iter} (effective K {effective_bald_k}), selected {len(new_prefs)} pairs.")
-                
-                #     if rewards_log:
-                #         plot_preference_heatmap(rewards_log, results_dir, it, range_min=-20, range_max=-2)
+            for c1, c2, p in new_prefs:
+                if random.random() < 0.8:
+                    train_pref_ds.add(c1, c2, p)
+                else:
+                    val_pref_ds.add(c1, c2, p)
 
-        for c1, c2, p in new_prefs:
-            if random.random() < 0.8:
-                train_pref_ds.add(c1, c2, p)
-            else:
-                val_pref_ds.add(c1, c2, p)
+        elif FEEDBACK_TYPE == "evaluative":
+            new_evaluative_data = sample_evaluative_data(clips_ds, target_points_this_iter)
+            print(f"Iteration {it}: Generated {len(new_evaluative_data)} new evaluative data points.")
+            for clip, rating in new_evaluative_data:
+                if random.random() < 0.8:
+                    train_eval_ds.add(clip, rating)
+                else:
+                    val_eval_ds.add(clip, rating)
 
         if use_random_sampling:
             reward_model, reward_logger_iteration = train_reward_model_batched(
                 reward_model,
-                train_pref_ds,
-                val_pref_ds,
+                train_dataset,
+                val_dataset,
                 device=device,
                 epochs=50,
                 patience=7,
                 optimizer=optimizer,
                 regularization_weight=rm_reg_weight,
                 logger=policy.logger,
-                iteration=reward_logger_iteration
+                iteration=reward_logger_iteration,
+                feedback_type=FEEDBACK_TYPE
             )
             for sub in vec_env.envs:
                 sub.reward_model = reward_model
@@ -457,8 +477,8 @@ def run_training(
             plot_correlation_by_bin(clips_ds, reward_model, it, results_dir, writer=writer)
         else:
             reward_ensemble.train_ensemble(
-                train_pref_ds,
-                val_pref_ds,
+                train_dataset,
+                val_dataset,
                 device=device,
                 epochs=rm_epochs,
                 patience=rm_patience,
@@ -466,7 +486,8 @@ def run_training(
                 optimizer_wd=rm_weight_decay,
                 regularization_weight=rm_reg_weight,
                 logger=policy.logger,
-                iteration=reward_logger_iteration
+                iteration=reward_logger_iteration,
+                feedback_type=FEEDBACK_TYPE
             )
             for sub in vec_env.envs:
                 sub.reward_model = reward_ensemble
@@ -505,10 +526,8 @@ def run_training(
             episode_reward += reward
             done = term or trunc
         total_reward += episode_reward
-
     mean_reward = total_reward / num_eval_episodes
     print(f"Final evaluation mean reward: {mean_reward}")
-    
     eval_env.close()
     print(f"Video saved to {video_folder}/")
     return mean_reward
@@ -518,23 +537,40 @@ def main():
     env_id = ENV_ID
 
     parser = argparse.ArgumentParser(
-        description=f"Train PPO on {env_id} with random or BALD-based preference sampling"
+        description=f"Train PPO on {env_id} with random, BALD-based, or ensemble-based preference sampling"
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--random", action="store_true",
                        help="sample preference pairs uniformly at random")
-    group.add_argument("--active", action="store_true",
+    group.add_argument("--bald", action="store_true",
                        help="sample preference pairs via BALD active learning")
+    group.add_argument("--ensemble", action="store_true",
+                       help="sample preference pairs via ensemble-based active learning")
     args = parser.parse_args()
 
+    if args.bald:
+        experiment_type = "active_bald"
+        use_bald = True
+        use_ensemble = False
+        use_random_sampling = False
+    elif args.ensemble:
+        experiment_type = "ensemble"
+        use_bald = False
+        use_ensemble = True
+        use_random_sampling = False
+    else:
+        experiment_type = "random"
+        use_bald = False
+        use_ensemble = False
+        use_random_sampling = True
+
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    experiment_type = "active_bald" if USE_BALD else "random"
     results_dir = f"{env_id}_results_{timestamp}"
     os.makedirs(results_dir, exist_ok=True)
     print(f"Results will be saved in: {results_dir}")
 
-    config_src = os.path.join(os.path.dirname(__file__), "cheetah_config.py")
-    config_dst = os.path.join(results_dir, "cheetah_config.py")
+    config_src = os.path.join(os.path.dirname(__file__), "hopper_config.py")
+    config_dst = os.path.join(results_dir, "hopper_config.py")
     shutil.copyfile(config_src, config_dst)
 
     shared_log_dir = f"./logs/{env_id}/"
@@ -544,7 +580,7 @@ def main():
         env_id=env_id,
         results_dir=results_dir,
         run_log_dir=run_log_dir,
-        use_random_sampling=args.random,
+        use_random_sampling=use_random_sampling,
         ppo_lr=PPO_LR,
         ppo_n_steps=PPO_N_STEPS,
         ppo_batch_size=PPO_BATCH_SIZE,
@@ -561,7 +597,8 @@ def main():
         rm_patience=REWARD_MODEL_PATIENCE,
         rm_dropout_prob=REWARD_MODEL_DROPOUT_PROB,
         reward_ensembles=REWARD_ENSEMBLES,
-        use_bald=USE_BALD,
+        use_bald=use_bald,
+        use_ensemble=use_ensemble,
         bald_k=BALD_K,
         bald_t=BALD_T,
         total_target_pairs=TOTAL_TARGET_PAIRS,

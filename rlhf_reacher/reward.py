@@ -35,10 +35,12 @@ def train_reward_model_batched(
     optimizer,
     regularization_weight,
     logger,
-    iteration
+    iteration,
+    feedback_type="preference"
 ):
     """
     Trains the reward model using separate training and validation datasets.
+    Supports both preference and evaluative feedback types.
     """
     model.to(device)
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
@@ -52,31 +54,49 @@ def train_reward_model_batched(
         train_loss = 0
         train_correct = 0
         train_total = 0
-        for s1, a1, s2, a2, pref in train_loader:
-            s1, a1, s2, a2, pref = s1.to(device), a1.to(device), s2.to(device), a2.to(device), pref.to(device)
-            
-            optimizer.zero_grad()
-            r1 = model(s1, a1).sum(dim=1)
-            r2 = model(s2, a2).sum(dim=1)
-            
-            logits = r1 - r2
-            loss = nn.BCEWithLogitsLoss()(logits, pref)
-            
-            # L2 regularization on rewards
-            l2_reg = regularization_weight * (torch.norm(r1) + torch.norm(r2))
-            total_loss = loss + l2_reg
-            
-            total_loss.backward()
-            optimizer.step()
-            train_loss += total_loss.item()
+        
+        for batch in train_loader:
+            if feedback_type == "preference":
+                s1, a1, s2, a2, pref = batch
+                s1, a1, s2, a2, pref = s1.to(device), a1.to(device), s2.to(device), a2.to(device), pref.to(device)
+                
+                optimizer.zero_grad()
+                r1 = model(s1, a1).sum(dim=1)
+                r2 = model(s2, a2).sum(dim=1)
+                
+                logits = r1 - r2
+                loss = nn.BCEWithLogitsLoss()(logits, pref)
+                
+                # L2 regularization on rewards
+                l2_reg = regularization_weight * (torch.norm(r1) + torch.norm(r2))
+                total_loss = loss + l2_reg
+                
+                total_loss.backward()
+                optimizer.step()
+                train_loss += total_loss.item()
 
-            train_preds = (logits > 0).float()
-            train_correct += (train_preds == pref).sum().item()
-            train_total += pref.size(0)
+                train_preds = (logits > 0).float()
+                train_correct += (train_preds == pref).sum().item()
+                train_total += pref.size(0)
+                
+            elif feedback_type == "evaluative":
+                states, actions, ratings = batch
+                states, actions, ratings = states.to(device), actions.to(device), ratings.to(device)
+                optimizer.zero_grad()
+                predicted_segment_rewards = model(states, actions).mean(dim=1)
+                loss = nn.MSELoss()(predicted_segment_rewards, ratings)
+                l2_reg = regularization_weight * torch.norm(predicted_segment_rewards)
+                total_loss = loss + l2_reg
+                total_loss.backward()
+                optimizer.step()
+                train_loss += total_loss.item()
+                train_total += ratings.size(0)
         
         avg_train_loss = train_loss / len(train_loader)
-        train_acc = train_correct / train_total
-
+        if feedback_type == "preference":
+            train_acc = train_correct / train_total
+        else:
+            train_acc = 0.0
 
         # Validation
         model.eval()
@@ -84,19 +104,31 @@ def train_reward_model_batched(
         correct = 0
         total = 0
         with torch.no_grad():
-            for s1, a1, s2, a2, pref in val_loader:
-                s1, a1, s2, a2, pref = s1.to(device), a1.to(device), s2.to(device), a2.to(device), pref.to(device)
-                r1 = model(s1, a1).sum(dim=1)
-                r2 = model(s2, a2).sum(dim=1)
-                logits = r1 - r2
-                val_loss += nn.BCEWithLogitsLoss()(logits, pref).item()
-                
-                preds = (logits > 0).float()
-                correct += (preds == pref).sum().item()
-                total += pref.size(0)
+            for batch in val_loader:
+                if feedback_type == "preference":
+                    s1, a1, s2, a2, pref = batch
+                    s1, a1, s2, a2, pref = s1.to(device), a1.to(device), s2.to(device), a2.to(device), pref.to(device)
+                    r1 = model(s1, a1).sum(dim=1)
+                    r2 = model(s2, a2).sum(dim=1)
+                    logits = r1 - r2
+                    val_loss += nn.BCEWithLogitsLoss()(logits, pref).item()
+                    
+                    preds = (logits > 0).float()
+                    correct += (preds == pref).sum().item()
+                    total += pref.size(0)
+                    
+                elif feedback_type == "evaluative":
+                    states, actions, ratings = batch
+                    states, actions, ratings = states.to(device), actions.to(device), ratings.to(device)
+                    predicted_segment_rewards = model(states, actions).sum(dim=1)
+                    val_loss += nn.MSELoss()(predicted_segment_rewards, ratings).item()
+                    total += ratings.size(0)
         
         avg_val_loss = val_loss / len(val_loader)
-        val_acc = correct / total
+        if feedback_type == "preference":
+            val_acc = correct / total
+        else:
+            val_acc = 0.0
 
         print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_acc:.4f}")
         if logger:
@@ -110,7 +142,6 @@ def train_reward_model_batched(
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
-            # torch.save(model.state_dict(), 'best_reward_model.pth')
         else:
             patience_counter += 1
             if patience_counter >= patience:
@@ -118,6 +149,5 @@ def train_reward_model_batched(
                 break
     
     return model, iteration
-        
 
         

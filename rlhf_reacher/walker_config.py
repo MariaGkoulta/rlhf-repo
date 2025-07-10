@@ -1,5 +1,5 @@
 
-ENV_ID = "Hopper-v4"
+ENV_ID = "Walker2d-v5"
 # For some MuJoCo envs, we might want to disable termination on unhealthy states
 # to learn from a wider range of behaviors.
 # Add environment IDs to this list to apply the setting.
@@ -21,7 +21,6 @@ TARGET_NUM_SEGMENTS_IF_EXTRACTING_PER_UPDATE = 200
 INITIAL_MIN_GAP = 0.25
 FINAL_MIN_GAP = 0.25
 NUM_BINS = 120
-USE_BALD = False
 BALD_POOL_SIZE = 50000
 BALD_K = 10000
 BALD_T = 10
@@ -51,9 +50,7 @@ REWARD_MODEL_EPOCHS = 100
 REWARD_MODEL_PATIENCE = 10
 REWARD_MODEL_DROPOUT_PROB = 0
 REWARD_ENSEMBLES = 5
-USE_REWARD_ENSEMBLES = False
 
-# Feedback type configuration
-FEEDBACK_TYPE = "evaluative"  # Options: "preference", "evaluative"
+FEEDBACK_TYPE = "preference"  # Options: "preference", "evaluative"
 EVALUATIVE_RATING_BINS = 10  # Number of rating bins for evaluative feedback (1-10)
 DISCOUNT_FACTOR = 0.99  # Gamma for discounted return calculation
