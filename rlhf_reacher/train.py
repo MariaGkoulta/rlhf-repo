@@ -36,7 +36,7 @@ from custom_env import LearnedRewardEnv
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
 from torch.utils.tensorboard import SummaryWriter
-from hopper_config import *
+from walker_config import *
 import shutil
 
 def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50):
@@ -296,7 +296,7 @@ def run_training(
     reward_ensemble = None
     optimizer = None
 
-    if use_random_sampling:
+    if use_random_sampling or use_bald:
         reward_model = RewardModel(obs_dim, act_dim, dropout_prob=rm_dropout_prob)
         optimizer = torch.optim.Adam(reward_model.parameters(), lr=rm_lr, weight_decay=rm_weight_decay)
         reward_model, reward_logger_iteration = train_reward_model_batched(
@@ -338,7 +338,7 @@ def run_training(
         e_time_limited = TimeLimit(wrapped_base_raw_env, max_episode_steps=max_episode_steps)
         e_monitored = Monitor(e_time_limited)
 
-        if use_random_sampling:
+        if use_random_sampling or use_bald:
             return LearnedRewardEnv(e_monitored, reward_model, normalize_rewards=normalize_rewards)
         else:
             return LearnedRewardEnv(e_monitored, reward_ensemble, normalize_rewards=normalize_rewards)
@@ -456,7 +456,7 @@ def run_training(
                 else:
                     val_eval_ds.add(clip, rating)
 
-        if use_random_sampling:
+        if use_random_sampling or use_bald:
             reward_model, reward_logger_iteration = train_reward_model_batched(
                 reward_model,
                 train_dataset,
@@ -497,7 +497,7 @@ def run_training(
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     policy.save(os.path.join(results_dir, f"ppo_final_{timestamp}.zip"))
-    final_model = reward_ensemble if not use_random_sampling else reward_model
+    final_model = reward_ensemble if use_ensemble else reward_model
     torch.save(
         final_model.state_dict(),
         os.path.join(results_dir, f"rm_final_{timestamp}.pth")
