@@ -75,7 +75,7 @@ def select_high_variance_pairs(
     uncertainty_method='bald',
     logger=None,
     iteration=None):
-    
+
     candidate_pairs = []
     num_candidates = min(len(clips) * (len(clips) - 1) // 2, num_pairs * 20)
     if len(clips) < 2:
@@ -112,6 +112,8 @@ def select_high_variance_pairs(
     if logger and iteration is not None and len(variances) > 0:
         logger.record("active_learning/ensemble_variance_mean", np.mean(variances))
         logger.record("active_learning/ensemble_variance_var", np.var(variances))
+        logger.dump(iteration)
+
 
     top_indices = np.argsort(-variances)[:num_pairs]
     selected_pairs = [candidate_pairs[i] for i in top_indices]

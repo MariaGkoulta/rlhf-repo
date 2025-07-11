@@ -60,10 +60,8 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     scores = [bald_score(model, c1, c2, T, device=device) for c1,c2 in pairs]
 
     if logger is not None:
-        logger.record("reward_model/avg_bald_score", np.mean(scores))
-        logger.record("reward_model/max_bald_score", np.max(scores))
-        logger.record("reward_model/min_bald_score", np.min(scores))
-        logger.record("reward_model/bald_variance", np.var(scores))
+        logger.record("active_learning/avg_bald_score", np.mean(scores))
+        logger.record("active_learning/bald_variance", np.var(scores))
         logger.dump(iteration)
 
     actual_K = min(K, len(scores))
