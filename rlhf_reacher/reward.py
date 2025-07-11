@@ -120,7 +120,7 @@ def train_reward_model_batched(
                 elif feedback_type == "evaluative":
                     states, actions, ratings = batch
                     states, actions, ratings = states.to(device), actions.to(device), ratings.to(device)
-                    predicted_segment_rewards = model(states, actions).sum(dim=1)
+                    predicted_segment_rewards = model(states, actions).mean(dim=1)
                     val_loss += nn.MSELoss()(predicted_segment_rewards, ratings).item()
                     total += ratings.size(0)
         

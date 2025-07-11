@@ -36,7 +36,7 @@ from custom_env import LearnedRewardEnv
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
 from torch.utils.tensorboard import SummaryWriter
-from walker_config import *
+from cheetah_config import *
 import shutil
 
 def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50):
@@ -438,7 +438,14 @@ def run_training(
         
                 if use_ensemble:
                     print(f"Using ensemble for active learning...")
-                    new_prefs = select_high_variance_pairs(clips_ds, reward_ensemble, target_points_this_iter, current_min_gap)
+                    new_prefs = select_high_variance_pairs(
+                        clips_ds,
+                        reward_ensemble,
+                        target_points_this_iter,
+                        current_min_gap,
+                        logger=policy.logger,
+                        iteration=reward_logger_iteration
+                    )
                     print(f"Iteration {it}: Selected {len(new_prefs)} high-variance pairs using ensemble.")
 
             for c1, c2, p in new_prefs:
