@@ -43,7 +43,7 @@ def sample_random_pairs(clips, num_pairs, min_gap):
         attempts += 1
     return cand_pairs
 
-def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu', logger=None, iteration=0): # Added device parameter
+def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu', logger=None, iteration=0, results_dir=None): # Added device parameter
     print(f"Selecting {K} active pairs from {len(clips)} clips with pool size {pool_size} and T={T}")
     if len(clips) < 2:
         return []
@@ -59,6 +59,9 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     pairs = [(clips[i], clips[j]) for i, j in pair_candidates]
     scores = [bald_score(model, c1, c2, T, device=device) for c1,c2 in pairs]
 
+    if results_dir:
+        plot_bald_diagnostics(pairs, scores, results_dir, iteration)
+
     if logger is not None:
         logger.record("active_learning/avg_bald_score", np.mean(scores))
         logger.record("active_learning/bald_variance", np.var(scores))
@@ -68,6 +71,39 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     idxs = np.argsort(scores)[-actual_K:]
     return [pairs[i] for i in idxs]
 
+def plot_bald_diagnostics(pairs, scores, results_dir, iteration):
+    """
+    Visualizes BALD scores to diagnose active learning performance.
+    - Plots a histogram of BALD scores.
+    - Plots BALD scores vs. the true reward difference of the pairs.
+    """
+    if not scores or len(scores) == 0:
+        print("No scores to plot for BALD diagnostics.")
+        return
+
+    true_reward_diffs = [abs(sum(c1['rews']) - sum(c2['rews'])) for c1, c2 in pairs]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+    # Histogram of BALD scores
+    ax1.hist(scores, bins=50)
+    ax1.set_title(f'BALD Score Distribution (Iter {iteration})')
+    ax1.set_xlabel('BALD Score')
+    ax1.set_ylabel('Frequency')
+    ax1.axvline(x=np.mean(scores), color='r', linestyle='--', label=f'Mean: {np.mean(scores):.4f}')
+    ax1.legend()
+
+    # Scatter plot of BALD score vs. true reward difference
+    ax2.scatter(true_reward_diffs, scores, alpha=0.5)
+    ax2.set_title(f'BALD Score vs. True Reward Difference (Iter {iteration})')
+    ax2.set_xlabel('Absolute True Reward Difference')
+    ax2.set_ylabel('BALD Score')
+
+    plt.tight_layout()
+    diagnostic_dir = os.path.join(results_dir, "bald_diagnostics")
+    os.makedirs(diagnostic_dir, exist_ok=True)
+    plt.savefig(os.path.join(diagnostic_dir, f"bald_diagnostic_iter_{iteration}.png"))
+    plt.close(fig)
 
 def variance_score(model, clip1, clip2, T=10, device='cpu'):
     """Calculates the variance of the predicted reward difference between two clips."""

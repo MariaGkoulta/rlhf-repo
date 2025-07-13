@@ -36,7 +36,7 @@ from custom_env import LearnedRewardEnv
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
 from torch.utils.tensorboard import SummaryWriter
-from cheetah_config import *
+from swimmer_config import *
 import shutil
 
 def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50):
@@ -424,7 +424,8 @@ def run_training(
                             K=effective_bald_k, T=bald_t,
                             device=device,
                             logger=policy.logger,
-                            iteration=reward_logger_iteration
+                            iteration=reward_logger_iteration,
+                            results_dir=results_dir
                         )
                     if cand_pairs:
                         _annotated_prefs, _, rewards_log = annotate_pairs(cand_pairs, min_gap=current_min_gap)
@@ -572,16 +573,23 @@ def main():
         use_random_sampling = True
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_time = datetime.datetime.now().strftime("%Y-%m-%d %H")
     results_dir = f"{env_id}_results_{timestamp}"
     os.makedirs(results_dir, exist_ok=True)
     print(f"Results will be saved in: {results_dir}")
 
-    config_src = os.path.join(os.path.dirname(__file__), "hopper_config.py")
-    config_dst = os.path.join(results_dir, "hopper_config.py")
-    shutil.copyfile(config_src, config_dst)
+    # config_src = os.path.join(os.path.dirname(__file__), "hopper_config.py")
+    # config_dst = os.path.join(results_dir, "hopper_config.py")
+    # shutil.copyfile(config_src, config_dst)
 
-    shared_log_dir = f"./logs/{env_id}/"
+    shared_log_dir = f"./logs/{experiment_time}/{env_id}/"
     run_log_dir = f"{shared_log_dir}{experiment_type}_{timestamp}/"
+
+    if use_bald:
+        rm_dropout_prob = BALD_REWARD_MODEL_DROPOUT_PROB
+    else:
+        rm_dropout_prob = REWARD_MODEL_DROPOUT_PROB
+    
     
     run_training(
         env_id=env_id,
@@ -602,7 +610,7 @@ def main():
         rm_reg_weight=REWARD_MODEL_REGULARIZATION_WEIGHT,
         rm_epochs=REWARD_MODEL_EPOCHS,
         rm_patience=REWARD_MODEL_PATIENCE,
-        rm_dropout_prob=REWARD_MODEL_DROPOUT_PROB,
+        rm_dropout_prob=rm_dropout_prob,
         reward_ensembles=REWARD_ENSEMBLES,
         use_bald=use_bald,
         use_ensemble=use_ensemble,
