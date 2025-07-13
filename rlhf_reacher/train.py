@@ -25,10 +25,7 @@ from custom_env import LearnedRewardEnv
 from reward_ensemble import RewardEnsemble, select_high_variance_pairs
 from evaluative import EvaluativeDataset, annotate_evaluative
 
-from preferences import (
-    UPPER_BIN, PreferenceDataset, annotate_preferences, clip_return,
-    create_bins, create_preferences, annotate_pairs
-)
+from preferences import PreferenceDataset, clip_return, annotate_pairs
 from reward import RewardModel, train_reward_model_batched
 from bald import select_active_pairs, select_variance_pairs
 from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred, plot_preference_heatmap
@@ -36,7 +33,7 @@ from custom_env import LearnedRewardEnv
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
 from torch.utils.tensorboard import SummaryWriter
-from swimmer_config import *
+from cheetah_config import *
 import shutil
 
 def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50):
@@ -122,7 +119,6 @@ def extract_segments_from_episodes(
                     for key, val in episode.items()
                 }
                 output_segments.append(segment)
-    # print number of segments extracted
     print(f"Extracted {len(output_segments)} segments of length {segment_len} from {len(episodes)} episodes.")
     return output_segments
 
@@ -141,8 +137,6 @@ def sample_evaluative_data(clips, num_samples):
         selected_clips = clips
     else:
         selected_clips = random.sample(clips, num_samples)
-    
-    # Annotate with evaluative ratings
     evaluative_data, _, _ = annotate_evaluative(
         selected_clips, 
         num_bins=EVALUATIVE_RATING_BINS, 
