@@ -169,7 +169,6 @@ def run_training(
     # Hyperparameters from config
     ppo_lr, ppo_n_steps, ppo_batch_size, ppo_ent_coef, ppo_n_epochs,
     initial_policy_ts, total_ppo_timesteps, ppo_timesteps_per_iter,
-    ppo_training_patience,
     rm_lr, rm_weight_decay, rm_reg_weight, rm_epochs, rm_patience,
     rm_dropout_prob,
     use_ensemble, reward_ensembles,
@@ -341,7 +340,7 @@ def run_training(
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False, gamma=policy.gamma)
     vec_env = VecMonitor(vec_env)
     policy.set_env(vec_env)
-    callback = TrueRewardCallback(patience=ppo_training_patience, verbose=1)
+    callback = TrueRewardCallback(verbose=1)
 
     it = 0
     T_cumulative_ppo_steps_in_loop = 0
@@ -598,7 +597,6 @@ def main():
         initial_policy_ts=INITIAL_POLICY_TS,
         total_ppo_timesteps=TOTAL_PPO_TIMESTEPS,
         ppo_timesteps_per_iter=PPO_TIMESTEPS_PER_ITER,
-        ppo_training_patience=PPO_TRAINING_PATIENCE,
         rm_lr=REWARD_MODEL_LEARNING_RATE,
         rm_weight_decay=REWARD_MODEL_WEIGHT_DECAY,
         rm_reg_weight=REWARD_MODEL_REGULARIZATION_WEIGHT,

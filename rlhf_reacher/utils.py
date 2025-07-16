@@ -39,19 +39,14 @@ class NoSeedArgumentWrapper(gym.Wrapper):
         
 class TrueRewardCallback(BaseCallback):
 
-    def __init__(self, verbose=0, patience=15):
+    def __init__(self, verbose=0):
         super().__init__(verbose)
-        self.patience = patience
-        self.best_mean_reward = -float('inf')
-        self.patience_counter = 0
-        self._stop_training = False
 
     def _on_training_start(self) -> None:
         """
         This method is called at the beginning of a `learn()` call.
         """
-        self.patience_counter = 0
-        self._stop_training = False
+        pass
 
     def _on_rollout_end(self) -> None:
         true_returns = []
@@ -64,21 +59,6 @@ class TrueRewardCallback(BaseCallback):
             current_mean_reward = np.mean(true_returns)
             self.logger.record("rollout/ep_true_mean", current_mean_reward)
             self.logger.record("rollout/ep_true_variance", np.var(true_returns))  # Log variance of true rewards
-
-            if current_mean_reward > self.best_mean_reward:
-                self.best_mean_reward = current_mean_reward
-                self.patience_counter = 0
-                if self.verbose > 0:
-                    print(f"New best mean reward: {self.best_mean_reward:.2f}. Resetting patience.")
-            else:
-                self.patience_counter += 1
-                if self.verbose > 0:
-                    print(f"No improvement in mean reward for {self.patience_counter} rollout(s).")
-            
-            if self.patience_counter >= self.patience:
-                self._stop_training = True
-                if self.verbose > 0:
-                    print(f"Stopping training early: patience of {self.patience} rollouts reached.")
 
         if learned_returns:
             self.logger.record("rollout/ep_learned_mean", np.mean(learned_returns))
@@ -97,6 +77,4 @@ class TrueRewardCallback(BaseCallback):
         #         subenv.ep_learned.clear()
 
     def _on_step(self) -> bool:
-        if self._stop_training:
-            return False
         return True
