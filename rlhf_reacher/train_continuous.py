@@ -352,14 +352,7 @@ def run_training(
     else:
         # If no more pairs to collect, we can do one long PPO run.
         ppo_timesteps_per_iter = total_ppo_timesteps
-
-    if total_target_pairs > initial_target_pairs:
-        ppo_steps_per_pair = (total_ppo_timesteps) / (total_target_pairs - initial_target_pairs)
-    else:
-        ppo_steps_per_pair = float('inf') # No more pairs to collect after initial phase
     
-    next_pair_collection_timestep = ppo_steps_per_pair
-
     while T_cumulative_ppo_steps_in_loop < total_ppo_timesteps:
         it += 1
         
@@ -412,7 +405,8 @@ def run_training(
         segment_rewards_for_plot = [clip_return(c) for c in new_segments]
         plot_rewards(segment_rewards_for_plot, results_dir, it, writer=writer)
 
-        while T_cumulative_ppo_steps_in_loop >= next_pair_collection_timestep and (len(train_dataset) + len(val_dataset)) < total_target_pairs:
+        # Only collect new preferences and retrain the reward model if we have more pairs to collect
+        if (len(train_dataset) + len(val_dataset)) < total_target_pairs:
             print(f"Collecting one new preference pair at {T_cumulative_ppo_steps_in_loop} PPO steps...")
             new_prefs = []
             if FEEDBACK_TYPE == "preference" and len(clips_ds) >= 2:
@@ -469,11 +463,8 @@ def run_training(
                     )
                     for sub in vec_env.envs:
                         sub.reward_model = reward_ensemble
-
-                next_pair_collection_timestep += ppo_steps_per_pair
             else:
                 print("No suitable pair found in this attempt. Continuing PPO training.")
-                break
 
         # Save models periodically
         policy.save(os.path.join(results_dir, f"ppo_{env_id}_iter_{it}.zip"))

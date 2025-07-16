@@ -76,6 +76,10 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     for i in range(len(candidate_clips)):
         for j in range(i + 1, len(candidate_clips)):
             pairs.append((candidate_clips[i], candidate_clips[j]))
+            if len(pairs) >= pool_size:
+                break
+        if len(pairs) >= pool_size:
+            break
     if not pairs:
         print("No pairs were generated.")
         return []
@@ -106,7 +110,7 @@ def plot_bald_diagnostics(pairs, scores, results_dir, iteration):
     - Plots a histogram of BALD scores.
     - Plots BALD scores vs. the true reward difference of the pairs.
     """
-    if not scores or len(scores) == 0:
+    if scores is None or len(scores) == 0:
         print("No scores to plot for BALD diagnostics.")
         return
 
