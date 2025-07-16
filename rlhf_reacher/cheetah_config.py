@@ -26,10 +26,8 @@ BALD_K = 10000
 BALD_T = 10
 # Scales the number of pairs collected per iteration based on the rate.
 # If T_cumulative is 0, rate factor is 1, so this is the initial target pairs per iter in main loop.
-TOTAL_TARGET_PAIRS = 750
+TOTAL_TARGET_PAIRS = 500
 INITIAL_COLLECTION_FRACTION = 0.1
-PPO_TIMESTEPS_PER_ITER = 20000  # Train policy more often with fewer steps
-REFERENCE_TIMESTEPS_FOR_RATE = 5e6
 TOTAL_PPO_TIMESTEPS = 3e6
 MAX_EPISODE_STEPS = 1000
 
@@ -39,7 +37,6 @@ PPO_LR = 3e-4
 PPO_N_EPOCHS = 10
 PPO_BATCH_SIZE = 64
 PPO_N_STEPS = 2048
-PPO_TRAINING_PATIENCE = 15
 
 # Reward model training hyperparameters
 REWARD_MODEL_LEARNING_RATE = 1e-3
@@ -47,7 +44,8 @@ REWARD_MODEL_WEIGHT_DECAY = 1e-3
 REWARD_MODEL_REGULARIZATION_WEIGHT = 1e-5
 REWARD_MODEL_EPOCHS = 100
 REWARD_MODEL_PATIENCE = 10
-REWARD_MODEL_DROPOUT_PROB = 0.2
+REWARD_MODEL_DROPOUT_PROB = 0.1
+BALD_REWARD_MODEL_DROPOUT_PROB = 0.4
 REWARD_ENSEMBLES = 5
 
 # Feedback type configuration
