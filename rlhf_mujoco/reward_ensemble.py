@@ -1,4 +1,3 @@
-# filepath: /rlhf_reacher/src/reward_ensemble.py
 import numpy as np
 import torch
 from torch.utils.data import Subset
