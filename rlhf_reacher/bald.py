@@ -10,54 +10,83 @@ def stack_obs_acts(clip, device='cpu'):
     acts = torch.tensor(np.stack(clip['acts']), dtype=torch.float32, device=device)
     return obs, acts
 
-def bald_score(model, clip1, clip2, T=10, device='cpu'):
+def bald_score(model, pairs, T=10, device='cpu'):
+    """
+    Compute BALD scores for a batch of pairs.
+    pairs: list of (clip1, clip2)
+    Returns: np.array of BALD scores, shape (len(pairs),)
+    """
     model.train()
+    n = len(pairs)
+    s1s_list, a1s_list, s2s_list, a2s_list = [], [], [], []
+    for c1, c2 in pairs:
+        s1, a1 = stack_obs_acts(c1, device)
+        s2, a2 = stack_obs_acts(c2, device)
+        s1s_list.append(s1)
+        a1s_list.append(a1)
+        s2s_list.append(s2)
+        a2s_list.append(a2)
+    # Pad to max length for batching
+    max_len1 = max(s.shape[0] for s in s1s_list) if s1s_list else 0
+    max_len2 = max(s.shape[0] for s in s2s_list) if s2s_list else 0
+    def pad_seq(seq_list, max_len):
+        return torch.stack([
+            F.pad(s, (0,0,0,max_len-s.shape[0])) for s in seq_list
+        ])
+    s1s = pad_seq(s1s_list, max_len1)
+    a1s = pad_seq(a1s_list, max_len1)
+    s2s = pad_seq(s2s_list, max_len2)
+    a2s = pad_seq(a2s_list, max_len2)
+    # Mask for valid timesteps
+    mask1 = torch.tensor([[1]*s.shape[0] + [0]*(max_len1-s.shape[0]) for s in s1s_list], device=device, dtype=torch.float32)
+    mask2 = torch.tensor([[1]*s.shape[0] + [0]*(max_len2-s.shape[0]) for s in s2s_list], device=device, dtype=torch.float32)
     probs = []
-    s1, a1 = stack_obs_acts(clip1, device)
-    s2, a2 = stack_obs_acts(clip2, device)
     for _ in range(T):
-        r1 = model(s1, a1).sum()
-        r2 = model(s2, a2).sum()
-        p  = torch.sigmoid(r1 - r2)
-        probs.append(p.item())
-    probs = np.array(probs)
-    p_mean = probs.mean()
-    # predictive entropy
+        r1_per_step = model(s1s, a1s)
+        r2_per_step = model(s2s, a2s)
+        
+        r1 = (r1_per_step * mask1).sum(dim=1)
+        r2 = (r2_per_step * mask2).sum(dim=1)
+
+        p = torch.sigmoid(r1 - r2)
+        probs.append(p.detach().cpu().numpy())
+    probs = np.stack(probs, axis=1)  # shape (n, T)
+    p_mean = probs.mean(axis=1)
     H_mean = - (p_mean*np.log(p_mean + 1e-8) + (1-p_mean)*np.log(1-p_mean+1e-8))
-    # expected entropy
     H_t = - (probs*np.log(probs+1e-8) + (1-probs)*np.log(1-probs+1e-8))
-    E_H   = H_t.mean()
+    E_H = H_t.mean(axis=1)
     return H_mean - E_H
 
-def sample_random_pairs(clips, num_pairs, min_gap):
-    """Samples pairs of clips randomly, returning the pairs themselves."""
-    cand_pairs = []
-    if not clips or len(clips) < 2:
-        return []
-    max_attempts = num_pairs * 100
-    attempts = 0
-    while len(cand_pairs) < num_pairs and attempts < max_attempts:
-        c1, c2 = random.sample(clips, 2)
-        if abs(sum(c1["rews"]) - sum(c2["rews"])) >= min_gap:
-            cand_pairs.append((c1, c2))
-        attempts += 1
-    return cand_pairs
-
-def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu', logger=None, iteration=0, results_dir=None): # Added device parameter
+def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu', logger=None, iteration=0, results_dir=None, batch_size=128):
+    """
+    Selects K pairs of clips with the highest BALD score.
+    Now uses batched BALD computation for speed.
+    """
     print(f"Selecting {K} active pairs from {len(clips)} clips with pool size {pool_size} and T={T}")
     if len(clips) < 2:
         return []
+    num_clips_to_sample = int(np.ceil((1 + np.sqrt(1 + 8 * pool_size)) / 2))
+    num_clips_to_sample = min(len(clips), num_clips_to_sample)
+    if num_clips_to_sample < 2:
+        print("Not enough clips to form a pair after sampling.")
+        return []
+    print(f"Sampling {num_clips_to_sample} clips to generate pair candidates.")
+    candidate_clips = random.sample(clips, num_clips_to_sample)
     pairs = []
-    pair_candidates = set()
-    max_attempts = pool_size * 50
-    attempts = 0
-    while len(pair_candidates) < pool_size and attempts < max_attempts:
-        c1_idx, c2_idx = random.sample(range(len(clips)), 2)
-        if c1_idx > c2_idx: c1_idx, c2_idx = c2_idx, c1_idx
-        pair_candidates.add((c1_idx, c2_idx))
-        attempts += 1
-    pairs = [(clips[i], clips[j]) for i, j in pair_candidates]
-    scores = [bald_score(model, c1, c2, T, device=device) for c1,c2 in pairs]
+    for i in range(len(candidate_clips)):
+        for j in range(i + 1, len(candidate_clips)):
+            pairs.append((candidate_clips[i], candidate_clips[j]))
+    if not pairs:
+        print("No pairs were generated.")
+        return []
+
+    # Batched BALD scoring
+    scores = []
+    for i in range(0, len(pairs), batch_size):
+        batch = pairs[i:i+batch_size]
+        batch_scores = bald_score(model, batch, T, device=device)
+        scores.extend(batch_scores)
+    scores = np.array(scores)
 
     if results_dir:
         plot_bald_diagnostics(pairs, scores, results_dir, iteration)
