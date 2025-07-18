@@ -49,9 +49,10 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
         return []
     pairs = []
     pair_candidates = set()
+    number_of_pairs_to_collect = pool_size * 50
     max_attempts = pool_size * 50
     attempts = 0
-    while len(pair_candidates) < pool_size and attempts < max_attempts:
+    while len(pair_candidates) < number_of_pairs_to_collect and attempts < max_attempts:
         c1_idx, c2_idx = random.sample(range(len(clips)), 2)
         if c1_idx > c2_idx: c1_idx, c2_idx = c2_idx, c1_idx
         pair_candidates.add((c1_idx, c2_idx))
