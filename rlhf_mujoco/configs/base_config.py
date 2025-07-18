@@ -18,7 +18,7 @@ FINAL_MIN_GAP = 0.25
 NUM_BINS = 120
 BALD_POOL_SIZE = 50000
 BALD_K = 10000
-BALD_T = 10
+BALD_T = 20
 INITIAL_COLLECTION_FRACTION = 0.1
 MAX_EPISODE_STEPS = 1000
 
@@ -41,6 +41,6 @@ BALD_REWARD_MODEL_DROPOUT_PROB = 0.4
 REWARD_ENSEMBLES = 5
 
 # Feedback type configuration
-FEEDBACK_TYPE = "evaluative"  # Options: "preference", "evaluative"
+FEEDBACK_TYPE = "preference"  # Options: "preference", "evaluative"
 EVALUATIVE_RATING_BINS = 10  # Number of rating bins for evaluative feedback (1-10)
 DISCOUNT_FACTOR = 0.99  # Gamma for discounted return calculation

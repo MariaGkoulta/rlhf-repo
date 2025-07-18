@@ -1,4 +1,4 @@
-from rlhf_mujoco.configs.base_config import *
+from .base_config import *
 
 ENV_ID = "HalfCheetah-v5"
 
