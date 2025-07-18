@@ -33,7 +33,7 @@ from custom_env import LearnedRewardEnv
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
 from torch.utils.tensorboard import SummaryWriter
-from rlhf_mujoco.configs.cheetah import *
+from configs.walker import *
 import shutil
 
 def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50):
@@ -567,7 +567,7 @@ def main():
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     experiment_time = datetime.datetime.now().strftime("%Y-%m-%d %H")
-    results_dir = f"{env_id}_results_{timestamp}"
+    results_dir = f"results/{env_id}_results_{timestamp}"
     os.makedirs(results_dir, exist_ok=True)
     print(f"Results will be saved in: {results_dir}")
 
