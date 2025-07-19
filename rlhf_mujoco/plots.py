@@ -45,6 +45,28 @@ def plot_correlation_by_bin(clips, reward_model, iteration, results_dir, bin_wid
     plt.close(fig)
     print(f"Saved correlation-by-bin plot to {out_path}")
 
+
+def plot_bald_evaluative_selection_distribution(all_rewards, selected_rewards, results_dir, iteration, writer=None):
+    """
+    Plots the distribution of rewards for all clips and the subset selected by BALD.
+    """
+    fig, ax = plt.subplots(figsize=(10, 6))
+    bins = np.linspace(min(all_rewards), max(all_rewards), 50)
+    ax.hist(all_rewards, bins=bins, color='blue', alpha=0.5, label='All Candidate Clips')
+    ax.hist(selected_rewards, bins=bins, color='red', alpha=0.7, label='BALD Selected Clips')
+    ax.set_title(f"Iteration {iteration} - BALD Selection Reward Distribution")
+    ax.set_xlabel("Sum of True Rewards per Clip")
+    ax.set_ylabel("Frequency")
+    ax.legend()
+    ax.grid(axis='y', alpha=0.75)
+    out_path = os.path.join(results_dir, f"iter_{iteration}_bald_selection_dist.png")
+    fig.tight_layout()
+    fig.savefig(out_path)
+    if writer:
+        log_plot_to_tensorboard(fig, writer, f"BALD/Selection_Distribution_Iter_{iteration}", iteration)
+    plt.close(fig)
+    print(f"Saved BALD selection distribution plot to {out_path}")
+
 def plot_preference_heatmap(reward_pairs, results_dir, iteration, num_bins=12, range_min=-60, range_max=0):
     """
     Generates and saves a heatmap of preference pair rewards.

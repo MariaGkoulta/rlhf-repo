@@ -28,7 +28,7 @@ from evaluative import EvaluativeDataset, annotate_evaluative
 from preferences import PreferenceDataset, clip_return, annotate_pairs
 from reward import RewardModel, train_reward_model_batched
 from bald import select_active_pairs, select_active_clips_for_evaluation
-from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred, plot_preference_heatmap
+from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred, plot_preference_heatmap, plot_bald_evaluative_selection_distribution
 from custom_env import LearnedRewardEnv
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
@@ -456,7 +456,7 @@ def run_training(
             if target_points_this_iter > 0 and clips_ds:
                 if use_bald:
                     print(f"Using BALD for active evaluative feedback selection...")
-                    selected_clips = select_active_clips_for_evaluation(
+                    selected_clips, all_rewards, selected_rewards = select_active_clips_for_evaluation(
                         clips_ds,
                         reward_model,
                         K=target_points_this_iter,
@@ -464,6 +464,10 @@ def run_training(
                         device=device,
                         logger=policy.logger,
                         iteration=reward_logger_iteration
+                    )
+                    if all_rewards and selected_rewards:
+                        plot_bald_evaluative_selection_distribution(
+                            all_rewards, selected_rewards, results_dir, it, writer=writer
                     )
                     new_evaluative_data, _, _ = annotate_evaluative(
                         selected_clips,

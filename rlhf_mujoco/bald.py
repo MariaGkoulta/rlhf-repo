@@ -85,15 +85,18 @@ def evaluative_bald_score(model, clip, T=10, device='cpu'):
 def select_active_clips_for_evaluation(clips, model, K=500, T=10, device='cpu', logger=None, iteration=0):
     print(f"Selecting {K} active clips for evaluation from {len(clips)} clips with T={T}")
     if not clips:
-        return []
+        return [], [], []
     scores = [evaluative_bald_score(model, c, T, device=device) for c in clips]
+    all_rewards = [sum(c["rews"]) for c in clips]
     if logger is not None:
         logger.record("active_learning/avg_evaluative_bald_score", np.mean(scores))
         logger.record("active_learning/evaluative_bald_variance", np.var(scores))
         logger.dump(iteration)
     actual_K = min(K, len(scores))
     idxs = np.argsort(scores)[-actual_K:]
-    return [clips[i] for i in idxs]
+    selected_clips = [clips[i] for i in idxs]
+    selected_rewards = [all_rewards[i] for i in idxs]
+    return selected_clips, all_rewards, selected_rewards
 
 def plot_bald_diagnostics(pairs, scores, results_dir, iteration):
     """
