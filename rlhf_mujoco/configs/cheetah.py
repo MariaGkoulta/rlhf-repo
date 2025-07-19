@@ -10,3 +10,5 @@ FINAL_SEGMENT_LEN = 40 # Length of segments to extract from clips
 # If T_cumulative is 0, rate factor is 1, so this is the initial target pairs per iter in main loop.
 TOTAL_TARGET_PAIRS = 500
 TOTAL_PPO_TIMESTEPS = 5e6
+
+FEEDBACK_TYPE = "evaluative"
