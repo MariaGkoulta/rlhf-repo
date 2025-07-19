@@ -72,6 +72,29 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     idxs = np.argsort(scores)[-actual_K:]
     return [pairs[i] for i in idxs]
 
+def evaluative_bald_score(model, clip, T=10, device='cpu'):
+    model.train()
+    predicted_returns = []
+    s, a = stack_obs_acts(clip, device)
+    with torch.no_grad():
+        for _ in range(T):
+            predicted_return = model(s, a).mean()
+            predicted_returns.append(predicted_return.item())
+    return np.var(predicted_returns)
+
+def select_active_clips_for_evaluation(clips, model, K=500, T=10, device='cpu', logger=None, iteration=0):
+    print(f"Selecting {K} active clips for evaluation from {len(clips)} clips with T={T}")
+    if not clips:
+        return []
+    scores = [evaluative_bald_score(model, c, T, device=device) for c in clips]
+    if logger is not None:
+        logger.record("active_learning/avg_evaluative_bald_score", np.mean(scores))
+        logger.record("active_learning/evaluative_bald_variance", np.var(scores))
+        logger.dump(iteration)
+    actual_K = min(K, len(scores))
+    idxs = np.argsort(scores)[-actual_K:]
+    return [clips[i] for i in idxs]
+
 def plot_bald_diagnostics(pairs, scores, results_dir, iteration):
     """
     Visualizes BALD scores to diagnose active learning performance.

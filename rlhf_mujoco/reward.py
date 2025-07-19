@@ -25,6 +25,14 @@ class RewardModel(nn.Module):
         with torch.no_grad():
             return self.forward(s, a).item()
         
+def calculate_discounted_reward_for_predictions(rewards, gamma):
+    """
+    Calculates the discounted reward for a batch of trajectories.
+    """
+    seq_len = rewards.shape[1]
+    discounts = torch.pow(gamma, torch.arange(seq_len, device=rewards.device)).unsqueeze(0)
+    return (rewards * discounts).sum(dim=1)
+        
 def train_reward_model_batched(
     model,
     train_dataset,
@@ -36,7 +44,9 @@ def train_reward_model_batched(
     regularization_weight,
     logger,
     iteration,
-    feedback_type="preference"
+    feedback_type="preference",
+    rating_scale=None,
+    gamma=0.99
 ):
     """
     Trains the reward model using separate training and validation datasets.
@@ -59,22 +69,17 @@ def train_reward_model_batched(
             if feedback_type == "preference":
                 s1, a1, s2, a2, pref = batch
                 s1, a1, s2, a2, pref = s1.to(device), a1.to(device), s2.to(device), a2.to(device), pref.to(device)
-                
                 optimizer.zero_grad()
                 r1 = model(s1, a1).sum(dim=1)
                 r2 = model(s2, a2).sum(dim=1)
-                
                 logits = r1 - r2
                 loss = nn.BCEWithLogitsLoss()(logits, pref)
-                
                 # L2 regularization on rewards
                 l2_reg = regularization_weight * (torch.norm(r1) + torch.norm(r2))
                 total_loss = loss + l2_reg
-                
                 total_loss.backward()
                 optimizer.step()
                 train_loss += total_loss.item()
-
                 train_preds = (logits > 0).float()
                 train_correct += (train_preds == pref).sum().item()
                 train_total += pref.size(0)
@@ -83,7 +88,13 @@ def train_reward_model_batched(
                 states, actions, ratings = batch
                 states, actions, ratings = states.to(device), actions.to(device), ratings.to(device)
                 optimizer.zero_grad()
-                predicted_segment_rewards = model(states, actions).mean(dim=1)
+                per_step_rewards = model(states, actions)
+                discounted_rewards = calculate_discounted_reward_for_predictions(per_step_rewards, gamma)
+                if rating_scale:
+                    min_rating, max_rating = rating_scale
+                    predicted_segment_rewards = torch.sigmoid(discounted_rewards) * (max_rating - min_rating) + min_rating
+                else:
+                    predicted_segment_rewards = discounted_rewards
                 loss = nn.MSELoss()(predicted_segment_rewards, ratings)
                 l2_reg = regularization_weight * torch.norm(predicted_segment_rewards)
                 total_loss = loss + l2_reg

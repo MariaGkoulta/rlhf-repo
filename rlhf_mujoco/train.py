@@ -27,14 +27,18 @@ from evaluative import EvaluativeDataset, annotate_evaluative
 
 from preferences import PreferenceDataset, clip_return, annotate_pairs
 from reward import RewardModel, train_reward_model_batched
-from bald import select_active_pairs, select_variance_pairs
+from bald import select_active_pairs, select_active_clips_for_evaluation
 from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred, plot_preference_heatmap
 from custom_env import LearnedRewardEnv
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
 from torch.utils.tensorboard import SummaryWriter
-from configs.walker import *
+from configs.cheetah import *
 import shutil
+
+if FEEDBACK_TYPE == "evaluative":
+    NORMALIZE_REWARDS = False  # Evaluative feedback does not require reward normalization
+    print("Setting NORMALIZE_REWARDS to False for evaluative feedback.")
 
 def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8, max_episode_steps=50):
     if env_id in UNHEALTHY_TERMINATION_ENVS:
@@ -449,8 +453,28 @@ def run_training(
                     val_pref_ds.add(c1, c2, p)
 
         elif FEEDBACK_TYPE == "evaluative":
-            new_evaluative_data = sample_evaluative_data(clips_ds, target_points_this_iter)
-            print(f"Iteration {it}: Generated {len(new_evaluative_data)} new evaluative data points.")
+            if target_points_this_iter > 0 and clips_ds:
+                if use_bald:
+                    print(f"Using BALD for active evaluative feedback selection...")
+                    selected_clips = select_active_clips_for_evaluation(
+                        clips_ds,
+                        reward_model,
+                        K=target_points_this_iter,
+                        T=bald_t,
+                        device=device,
+                        logger=policy.logger,
+                        iteration=reward_logger_iteration
+                    )
+                    new_evaluative_data, _, _ = annotate_evaluative(
+                        selected_clips,
+                        num_bins=EVALUATIVE_RATING_BINS,
+                        discount_factor=DISCOUNT_FACTOR
+                    )
+                    print(f"Iteration {it}: BALD selected {len(new_evaluative_data)} clips for evaluation.")
+                else: # Fallback to random sampling for evaluative feedback
+                    new_evaluative_data = sample_evaluative_data(clips_ds, target_points_this_iter)
+                    print(f"Iteration {it}: Randomly generated {len(new_evaluative_data)} new evaluative data points.")
+
             for clip, rating in new_evaluative_data:
                 if random.random() < 0.8:
                     train_eval_ds.add(clip, rating)
