@@ -135,3 +135,11 @@ results_*
 # Ignore logs
 logs/*
 *.zip
+
+*_results_*
+
+logs/
+results/
+videos/
+
+rlhf/
