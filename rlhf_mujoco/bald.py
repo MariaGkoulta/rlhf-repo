@@ -72,21 +72,24 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     idxs = np.argsort(scores)[-actual_K:]
     return [pairs[i] for i in idxs]
 
-def evaluative_bald_score(model, clip, T=10, device='cpu'):
+def evaluative_bald_score(model, clip, T=10, device='cpu', gamma=0.99):
     model.train()
-    predicted_returns = []
+    predicted_discounted_returns = []
     s, a = stack_obs_acts(clip, device)
+    seq_len = s.shape[0]
+    discounts = torch.pow(gamma, torch.arange(seq_len, device=device))
     with torch.no_grad():
         for _ in range(T):
-            predicted_return = model(s, a).mean()
-            predicted_returns.append(predicted_return.item())
-    return np.var(predicted_returns)
+            per_step_rewards = model(s, a)
+            discounted_return = (per_step_rewards * discounts).sum()
+            predicted_discounted_returns.append(discounted_return.item())
+    return np.var(predicted_discounted_returns)
 
-def select_active_clips_for_evaluation(clips, model, K=500, T=10, device='cpu', logger=None, iteration=0):
+def select_active_clips_for_evaluation(clips, model, K=500, T=10, device='cpu', logger=None, iteration=0, gamma=0.99):
     print(f"Selecting {K} active clips for evaluation from {len(clips)} clips with T={T}")
     if not clips:
         return [], [], []
-    scores = [evaluative_bald_score(model, c, T, device=device) for c in clips]
+    scores = [evaluative_bald_score(model, c, T, device=device, gamma=gamma) for c in clips]
     all_rewards = [sum(c["rews"]) for c in clips]
     if logger is not None:
         logger.record("active_learning/avg_evaluative_bald_score", np.mean(scores))

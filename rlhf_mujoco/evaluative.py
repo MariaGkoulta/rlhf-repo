@@ -68,22 +68,20 @@ class EvaluativeDataset(Dataset):
     def __getitem__(self, idx):
         return self.states[idx], self.actions[idx], self.ratings[idx]
 
-def annotate_evaluative(clips, num_bins=10, discount_factor=0.99):
+def annotate_evaluative(clips, num_bins=10, discount_factor=0.99, rating_range=(0, 10)):
     """
     Annotates clips with evaluative ratings based on discounted returns.
     """
     evaluative_data = []
     discounted_returns = []
+    min_return, max_return = rating_range
+    bin_edges = np.linspace(min_return, max_return, num_bins)
     for clip in clips:
         discounted_return = calculate_discounted_return(clip, discount_factor)
         discounted_returns.append(discounted_return)
-        min_return = min(discounted_returns)
-    max_return = max(discounted_returns)
-    bin_edges = np.linspace(min_return, max_return, num_bins + 1)
-    for clip, discounted_return in zip(clips, discounted_returns):
-        bin_idx = np.digitize(discounted_return, bin_edges)
-        rating = max(1, min(num_bins, bin_idx))
-        evaluative_data.append((clip, rating))
+        clipped_return = np.clip(discounted_return, min_return, max_return)
+        rating = np.digitize(clipped_return, bin_edges)
+        evaluative_data.append((clip, float(rating)))
     return evaluative_data, discounted_returns, bin_edges
 
 def calculate_discounted_return(clip, discount_factor=0.99):

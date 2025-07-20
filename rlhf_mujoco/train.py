@@ -141,7 +141,8 @@ def sample_evaluative_data(clips, num_samples):
     evaluative_data, _, _ = annotate_evaluative(
         selected_clips, 
         num_bins=EVALUATIVE_RATING_BINS, 
-        discount_factor=DISCOUNT_FACTOR
+        discount_factor=DISCOUNT_FACTOR,
+        rating_range=EVALUATIVE_RATING_RANGE
     )
     return evaluative_data
 
@@ -464,7 +465,8 @@ def run_training(
                         T=bald_t,
                         device=device,
                         logger=policy.logger,
-                        iteration=reward_logger_iteration
+                        iteration=reward_logger_iteration,
+                        gamma=DISCOUNT_FACTOR
                     )
                     if all_rewards and selected_rewards:
                         plot_bald_evaluative_selection_distribution(
@@ -473,7 +475,8 @@ def run_training(
                     new_evaluative_data, _, _ = annotate_evaluative(
                         selected_clips,
                         num_bins=EVALUATIVE_RATING_BINS,
-                        discount_factor=DISCOUNT_FACTOR
+                        discount_factor=DISCOUNT_FACTOR,
+                        rating_range=EVALUATIVE_RATING_RANGE
                     )
                     print(f"Iteration {it}: BALD selected {len(new_evaluative_data)} clips for evaluation.")
                 else: # Fallback to random sampling for evaluative feedback
