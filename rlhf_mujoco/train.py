@@ -466,7 +466,8 @@ def run_training(
                         device=device,
                         logger=policy.logger,
                         iteration=reward_logger_iteration,
-                        gamma=DISCOUNT_FACTOR
+                        gamma=DISCOUNT_FACTOR,
+                        rating_range= EVALUATIVE_RATING_RANGE
                     )
                     if all_rewards and selected_rewards:
                         plot_bald_evaluative_selection_distribution(

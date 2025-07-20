@@ -72,18 +72,20 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     idxs = np.argsort(scores)[-actual_K:]
     return [pairs[i] for i in idxs]
 
-def evaluative_bald_score(model, clip, T=10, device='cpu', gamma=0.99):
+def evaluative_bald_score(model, clip, T=10, device='cpu', gamma=0.99, rating_range=(0, 10)):
     model.train()
-    predicted_discounted_returns = []
+    predicted_ratings = []
     s, a = stack_obs_acts(clip, device)
     seq_len = s.shape[0]
     discounts = torch.pow(gamma, torch.arange(seq_len, device=device))
+    min_rating, max_rating = rating_range
     with torch.no_grad():
         for _ in range(T):
             per_step_rewards = model(s, a)
             discounted_return = (per_step_rewards * discounts).sum()
-            predicted_discounted_returns.append(discounted_return.item())
-    return np.var(predicted_discounted_returns)
+            predicted_rating = torch.sigmoid(discounted_return) * (max_rating - min_rating) + min_rating
+            predicted_ratings.append(predicted_rating.item())
+    return np.var(predicted_ratings)
 
 def select_active_clips_for_evaluation(clips, model, K=500, T=10, device='cpu', logger=None, iteration=0, gamma=0.99):
     print(f"Selecting {K} active clips for evaluation from {len(clips)} clips with T={T}")

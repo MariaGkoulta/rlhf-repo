@@ -131,7 +131,13 @@ def train_reward_model_batched(
                 elif feedback_type == "evaluative":
                     states, actions, ratings = batch
                     states, actions, ratings = states.to(device), actions.to(device), ratings.to(device)
-                    predicted_segment_rewards = model(states, actions).mean(dim=1)
+                    per_step_rewards = model(states, actions)
+                    discounted_rewards = calculate_discounted_reward_for_predictions(per_step_rewards, gamma)
+                    if rating_scale:
+                        min_rating, max_rating = rating_scale
+                        predicted_segment_rewards = torch.sigmoid(discounted_rewards) * (max_rating - min_rating) + min_rating
+                    else:
+                        predicted_segment_rewards = discounted_rewards
                     val_loss += nn.MSELoss()(predicted_segment_rewards, ratings).item()
                     total += ratings.size(0)
         
