@@ -87,11 +87,11 @@ def evaluative_bald_score(model, clip, T=10, device='cpu', gamma=0.99, rating_ra
             predicted_ratings.append(predicted_rating.item())
     return np.var(predicted_ratings)
 
-def select_active_clips_for_evaluation(clips, model, K=500, T=10, device='cpu', logger=None, iteration=0, gamma=0.99):
+def select_active_clips_for_evaluation(clips, model, K=500, T=10, device='cpu', logger=None, iteration=0, gamma=0.99, rating_range=(0, 10)):
     print(f"Selecting {K} active clips for evaluation from {len(clips)} clips with T={T}")
     if not clips:
         return [], [], []
-    scores = [evaluative_bald_score(model, c, T, device=device, gamma=gamma) for c in clips]
+    scores = [evaluative_bald_score(model, c, T, device=device, gamma=gamma, rating_range=rating_range) for c in clips]
     all_rewards = [sum(c["rews"]) for c in clips]
     if logger is not None:
         logger.record("active_learning/avg_evaluative_bald_score", np.mean(scores))
