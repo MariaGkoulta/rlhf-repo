@@ -137,10 +137,7 @@ def sample_random_preferences(clips, num_samples, min_gap):
 
 def sample_evaluative_data(clips, num_samples):
     """Sample clips for evaluative feedback annotation."""
-    if len(clips) < num_samples:
-        selected_clips = clips
-    else:
-        selected_clips = random.sample(clips, num_samples)
+    selected_clips = random.sample(clips, num_samples)
     evaluative_data, _, _ = annotate_evaluative(
         selected_clips, 
         num_bins=EVALUATIVE_RATING_BINS, 
@@ -292,7 +289,8 @@ def run_training(
     reward_model = None
     reward_ensemble = None
     optimizer = None
-
+    print(f"Training dataset size: {len(train_dataset)}")
+          
     if use_random_sampling or use_bald:
         reward_model = RewardModel(obs_dim, act_dim, dropout_prob=rm_dropout_prob)
         optimizer = torch.optim.Adam(reward_model.parameters(), lr=rm_lr, weight_decay=rm_weight_decay)
@@ -401,6 +399,7 @@ def run_training(
         else:
             target_points_this_iter = 0
         new_prefs = []
+        new_evaluative_data = []
 
         if FEEDBACK_TYPE == "preference":
             if target_points_this_iter > 0 and clips_ds:
@@ -452,6 +451,8 @@ def run_training(
                 else:
                     val_pref_ds.add(c1, c2, p)
 
+            print(f"Iteration {it}: Added {len(new_prefs)} new preference pairs. Train dataset size: {len(train_pref_ds)}, Val dataset size: {len(val_pref_ds)}")
+
         elif FEEDBACK_TYPE == "evaluative":
             if target_points_this_iter > 0 and clips_ds:
                 if use_bald:
@@ -484,6 +485,8 @@ def run_training(
                     train_eval_ds.add(clip, rating)
                 else:
                     val_eval_ds.add(clip, rating)
+                
+        policy.logger.record("params/num_train_data", len(train_dataset))
 
         if use_random_sampling or use_bald:
             reward_model, reward_logger_iteration = train_reward_model_batched(
