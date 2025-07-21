@@ -89,15 +89,9 @@ def train_reward_model_batched(
                 states, actions, ratings = states.to(device), actions.to(device), ratings.to(device)
                 optimizer.zero_grad()
                 per_step_rewards = model(states, actions)
-                discounted_rewards = calculate_discounted_reward_for_predictions(per_step_rewards, gamma)
-                if rating_scale:
-                    min_rating, max_rating = rating_scale
-                    predicted_segment_rewards = torch.sigmoid(discounted_rewards) * (max_rating - min_rating) + min_rating
-                else:
-                    predicted_segment_rewards = discounted_rewards
+                predicted_segment_rewards = per_step_rewards.sum(dim=1)
                 loss = nn.MSELoss()(predicted_segment_rewards, ratings)
-                l2_reg = regularization_weight * torch.norm(predicted_segment_rewards)
-                total_loss = loss + l2_reg
+                total_loss = loss
                 total_loss.backward()
                 optimizer.step()
                 train_loss += total_loss.item()
@@ -132,12 +126,7 @@ def train_reward_model_batched(
                     states, actions, ratings = batch
                     states, actions, ratings = states.to(device), actions.to(device), ratings.to(device)
                     per_step_rewards = model(states, actions)
-                    discounted_rewards = calculate_discounted_reward_for_predictions(per_step_rewards, gamma)
-                    if rating_scale:
-                        min_rating, max_rating = rating_scale
-                        predicted_segment_rewards = torch.sigmoid(discounted_rewards) * (max_rating - min_rating) + min_rating
-                    else:
-                        predicted_segment_rewards = discounted_rewards
+                    predicted_segment_rewards = per_step_rewards.sum(dim=1)
                     val_loss += nn.MSELoss()(predicted_segment_rewards, ratings).item()
                     total += ratings.size(0)
         

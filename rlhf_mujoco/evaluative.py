@@ -68,29 +68,25 @@ class EvaluativeDataset(Dataset):
     def __getitem__(self, idx):
         return self.states[idx], self.actions[idx], self.ratings[idx]
 
-def annotate_evaluative(clips, num_bins=10, discount_factor=0.99, rating_range=(0, 10)):
+def annotate_evaluative(clips, num_bins=10, rating_range=(0, 10)):
     """
-    Annotates clips with evaluative ratings based on discounted returns.
+    Annotates clips with evaluative ratings based on undiscounted returns.
     """
     evaluative_data = []
-    discounted_returns = []
+    returns = []
     min_return, max_return = rating_range
     bin_edges = np.linspace(min_return, max_return, num_bins)
     for clip in clips:
-        discounted_return = calculate_discounted_return(clip, discount_factor)
-        discounted_returns.append(discounted_return)
-        clipped_return = np.clip(discounted_return, min_return, max_return)
+        undiscounted_return = calculate_return(clip)
+        returns.append(undiscounted_return)
+        clipped_return = np.clip(undiscounted_return, min_return, max_return)
         rating = np.digitize(clipped_return, bin_edges)
         evaluative_data.append((clip, float(rating)))
-    return evaluative_data, discounted_returns, bin_edges
+    return evaluative_data, returns, bin_edges
 
-def calculate_discounted_return(clip, discount_factor=0.99):
+def calculate_return(clip):
     """
-    Calculate the discounted return for a trajectory segment.
-    R(ξ) = Σ(t=0 to L-1) γ^t * r_t
+    Calculate the undiscounted return for a trajectory segment.
+    R(ξ) = Σ(t=0 to L-1) r_t
     """
-    rewards = clip["rews"]
-    discounted_return = 0.0
-    for t, reward in enumerate(rewards):
-        discounted_return += (discount_factor ** t) * reward
-    return discounted_return
+    return sum(clip["rews"])

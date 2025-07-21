@@ -72,20 +72,32 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     idxs = np.argsort(scores)[-actual_K:]
     return [pairs[i] for i in idxs]
 
-def evaluative_bald_score(model, clip, T=10, device='cpu', gamma=0.99, rating_range=(0, 10)):
+def evaluative_bald_score(model, clip, T=10, device='cpu', rating_range=(0, 10), num_bins=10):
+    """
+    Calculates the BALD score for a clip for evaluative feedback.
+    BALD(x) = H[E_θ[p(y|x,θ)]] - E_θ[H[p(y|x,θ)]]
+    where y is the rating bin.
+    """
     model.train()
-    predicted_ratings = []
     s, a = stack_obs_acts(clip, device)
-    seq_len = s.shape[0]
-    discounts = torch.pow(gamma, torch.arange(seq_len, device=device))
-    min_rating, max_rating = rating_range
+    min_return, max_return = rating_range
+    bin_edges = np.linspace(min_return, max_return, num_bins)
+    pred_probs = np.zeros((T, num_bins))
     with torch.no_grad():
-        for _ in range(T):
+        for t in range(T):
             per_step_rewards = model(s, a)
-            discounted_return = (per_step_rewards * discounts).sum()
-            predicted_rating = torch.sigmoid(discounted_return) * (max_rating - min_rating) + min_rating
-            predicted_ratings.append(predicted_rating.item())
-    return np.var(predicted_ratings)
+            undiscounted_return = per_step_rewards.sum().item()
+            bin_idx = np.digitize(undiscounted_return, bin_edges) - 1
+            bin_idx = np.clip(bin_idx, 0, num_bins - 1)
+            pred_probs[t, bin_idx] = 1.0
+    mean_pred_probs = np.mean(pred_probs, axis=0)
+    entropy_of_mean = -np.sum(mean_pred_probs * np.log(mean_pred_probs + 1e-9), axis=-1)
+    # H[p(y|x,θ)]: Entropy of each predictive distribution
+    # Since each p(y|x,θ) is one-hot, its entropy is 0.
+    # E_θ[H[p(y|x,θ)]]: The mean of these entropies is also 0.
+    mean_of_entropies = 0.0
+    bald_score = entropy_of_mean - mean_of_entropies
+    return bald_score
 
 def select_active_clips_for_evaluation(clips, model, K=500, T=10, device='cpu', logger=None, iteration=0, gamma=0.99, rating_range=(0, 10)):
     print(f"Selecting {K} active clips for evaluation from {len(clips)} clips with T={T}")
