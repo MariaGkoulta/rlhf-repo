@@ -127,7 +127,7 @@ def train_reward_model_batched(
                     states, actions, ratings = states.to(device), actions.to(device), ratings.to(device)
                     per_step_rewards = model(states, actions)
                     predicted_segment_rewards = per_step_rewards.sum(dim=1)
-                    val_loss += nn.MSELoss()(predicted_segment_rewards, ratings).item()
+                    val_loss += nn.MSELoss(reduction='sum')(predicted_segment_rewards, ratings).item()
                     total += ratings.size(0)
         
         avg_val_loss = val_loss / len(val_loader)

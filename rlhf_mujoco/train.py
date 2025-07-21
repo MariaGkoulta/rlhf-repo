@@ -140,8 +140,7 @@ def sample_evaluative_data(clips, num_samples):
     selected_clips = random.sample(clips, num_samples)
     evaluative_data, _, _ = annotate_evaluative(
         selected_clips, 
-        num_bins=EVALUATIVE_RATING_BINS, 
-        discount_factor=DISCOUNT_FACTOR,
+        num_bins=EVALUATIVE_RATING_BINS,
         rating_range=EVALUATIVE_RATING_RANGE
     )
     return evaluative_data
@@ -476,7 +475,6 @@ def run_training(
                     new_evaluative_data, _, _ = annotate_evaluative(
                         selected_clips,
                         num_bins=EVALUATIVE_RATING_BINS,
-                        discount_factor=DISCOUNT_FACTOR,
                         rating_range=EVALUATIVE_RATING_RANGE
                     )
                     print(f"Iteration {it}: BALD selected {len(new_evaluative_data)} clips for evaluation.")
