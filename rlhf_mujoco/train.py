@@ -137,7 +137,10 @@ def sample_random_preferences(clips, num_samples, min_gap):
 
 def sample_evaluative_data(clips, num_samples):
     """Sample clips for evaluative feedback annotation."""
-    selected_clips = random.sample(clips, num_samples)
+    num_to_sample = min(len(clips), num_samples)
+    if num_to_sample == 0:
+        return [], [], []
+    selected_clips = random.sample(clips, num_to_sample)
     evaluative_data, _, _ = annotate_evaluative(
         selected_clips, 
         num_bins=EVALUATIVE_RATING_BINS,
@@ -305,7 +308,8 @@ def run_training(
             regularization_weight=rm_reg_weight,
             logger=policy.logger,
             iteration=reward_logger_iteration,
-            feedback_type=FEEDBACK_TYPE
+            feedback_type=FEEDBACK_TYPE,
+            rating_scale=EVALUATIVE_RATING_SCALE
         )
     else: 
         reward_ensemble = RewardEnsemble(obs_dim, act_dim, num_models=reward_ensembles, dropout_prob=rm_dropout_prob)
@@ -502,7 +506,8 @@ def run_training(
                 regularization_weight=rm_reg_weight,
                 logger=policy.logger,
                 iteration=reward_logger_iteration,
-                feedback_type=FEEDBACK_TYPE
+                feedback_type=FEEDBACK_TYPE,
+                rating_scale=EVALUATIVE_RATING_SCALE
             )
             for sub in vec_env.envs:
                 sub.reward_model = reward_model

@@ -45,3 +45,4 @@ FEEDBACK_TYPE = "preference"  # Options: "preference", "evaluative"
 EVALUATIVE_RATING_BINS = 10  # Number of rating bins for evaluative feedback (1-10)
 DISCOUNT_FACTOR = 0.99  # Gamma for discounted return calculation
 EVALUATIVE_RATING_RANGE = (0, 10)  # Range of ratings for evaluative feedback
+EVALUATIVE_RATING_SCALE = 10
