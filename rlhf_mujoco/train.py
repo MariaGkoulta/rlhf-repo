@@ -609,9 +609,15 @@ def main():
     os.makedirs(results_dir, exist_ok=True)
     print(f"Results will be saved in: {results_dir}")
 
-    # config_src = os.path.join(os.path.dirname(__file__), "hopper_config.py")
-    # config_dst = os.path.join(results_dir, "hopper_config.py")
-    # shutil.copyfile(config_src, config_dst)
+    config_name = env_id.split('-')[0].lower()
+    if config_name == "halfcheetah":
+        config_name = "cheetah"
+    elif config_name == "walker2d":
+        config_name = "walker"
+    config_filename = f"{config_name}.py"
+    config_src = os.path.join(os.path.dirname(__file__), "configs", config_filename)
+    config_dst = os.path.join(results_dir, config_filename)
+    shutil.copyfile(config_src, config_dst)
 
     shared_log_dir = f"./logs/{experiment_time}/{env_id}/"
     run_log_dir = f"{shared_log_dir}{experiment_type}_{timestamp}/"
