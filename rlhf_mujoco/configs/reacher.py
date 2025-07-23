@@ -20,3 +20,7 @@ PPO_LR = 1e-4
 
 # Reward model training hyperparameters
 REWARD_MODEL_WEIGHT_DECAY = 1e-2
+
+FEEDBACK_TYPE = "evaluative"
+EVALUATIVE_RATING_RANGE = (-100, -5)
+EVALUATIVE_RATING_SCALE = None

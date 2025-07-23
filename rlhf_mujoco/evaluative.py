@@ -68,19 +68,24 @@ class EvaluativeDataset(Dataset):
     def __getitem__(self, idx):
         return self.states[idx], self.actions[idx], self.ratings[idx]
 
-def annotate_evaluative(clips, num_bins=10, rating_range=(0, 10)):
+def annotate_evaluative(clips, num_bins=10, rating_range=None):
     """
     Annotates clips with evaluative ratings based on undiscounted returns.
+    Uses a fixed rating range for Hopper, otherwise calculates it from the clips.
     """
     evaluative_data = []
     returns = []
-    min_return, max_return = rating_range
-    bin_edges = np.linspace(min_return, max_return, num_bins)
+    if rating_range is not None:
+        min_return, max_return = rating_range
+    bin_edges = np.linspace(min_return, max_return, num_bins + 1)
     for clip in clips:
         undiscounted_return = calculate_return(clip)
+        print(f"Undiscounted return for clip: {undiscounted_return}")
         returns.append(undiscounted_return)
         clipped_return = np.clip(undiscounted_return, min_return, max_return)
-        rating = np.digitize(clipped_return, bin_edges)
+        print(f"Clipped return: {clipped_return}")
+        rating = np.digitize(clipped_return, bin_edges[1:-1])
+        print(f"Rating for clip: {rating}")
         evaluative_data.append((clip, float(rating)))
     return evaluative_data, returns, bin_edges
 

@@ -90,8 +90,8 @@ def train_reward_model_batched(
                 optimizer.zero_grad()
                 per_step_rewards = model(states, actions)
                 predicted_segment_rewards = per_step_rewards.sum(dim=1)
-                if rating_scale is not None:
-                    predicted_segment_rewards = torch.sigmoid(predicted_segment_rewards) * rating_scale
+                # if rating_scale is not None:
+                #     predicted_segment_rewards = torch.sigmoid(predicted_segment_rewards) * rating_scale
                 loss = nn.MSELoss()(predicted_segment_rewards, ratings)
                 total_loss = loss
                 total_loss.backward()
@@ -129,9 +129,9 @@ def train_reward_model_batched(
                     states, actions, ratings = states.to(device), actions.to(device), ratings.to(device)
                     per_step_rewards = model(states, actions)
                     predicted_segment_rewards = per_step_rewards.sum(dim=1)
-                    if rating_scale is not None:
-                        predicted_segment_rewards = torch.sigmoid(predicted_segment_rewards) * rating_scale
-                    val_loss += nn.MSELoss(reduction='sum')(predicted_segment_rewards, ratings).item()
+                    # if rating_scale is not None:
+                    #     predicted_segment_rewards = torch.sigmoid(predicted_segment_rewards) * rating_scale
+                    val_loss += nn.MSELoss()(predicted_segment_rewards, ratings).item()
                     total += ratings.size(0)
         
         avg_val_loss = val_loss / len(val_loader)
