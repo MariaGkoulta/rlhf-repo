@@ -33,7 +33,7 @@ from custom_env import LearnedRewardEnv
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
 from torch.utils.tensorboard import SummaryWriter
-from configs.cheetah import *
+from configs.walker import *
 import shutil
 
 if FEEDBACK_TYPE == "evaluative":
@@ -144,7 +144,7 @@ def sample_evaluative_data(clips, num_samples):
     evaluative_data, _, _ = annotate_evaluative(
         selected_clips, 
         num_bins=EVALUATIVE_RATING_BINS,
-        rating_range=EVALUATIVE_RATING_RANGE
+        rating_range=EVALUATIVE_RATING_RANGE,
     )
     return evaluative_data
 
@@ -479,7 +479,7 @@ def run_training(
                     new_evaluative_data, _, _ = annotate_evaluative(
                         selected_clips,
                         num_bins=EVALUATIVE_RATING_BINS,
-                        rating_range=EVALUATIVE_RATING_RANGE
+                        rating_range=EVALUATIVE_RATING_RANGE,
                     )
                     print(f"Iteration {it}: BALD selected {len(new_evaluative_data)} clips for evaluation.")
                 else: # Fallback to random sampling for evaluative feedback
@@ -507,7 +507,7 @@ def run_training(
                 logger=policy.logger,
                 iteration=reward_logger_iteration,
                 feedback_type=FEEDBACK_TYPE,
-                rating_scale=EVALUATIVE_RATING_SCALE
+                rating_scale=EVALUATIVE_RATING_SCALE,
             )
             for sub in vec_env.envs:
                 sub.reward_model = reward_model
