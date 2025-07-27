@@ -68,9 +68,9 @@ class EvaluativeDataset(Dataset):
     def __getitem__(self, idx):
         return self.states[idx], self.actions[idx], self.ratings[idx]
 
-def annotate_evaluative(clips, num_bins=10, rating_range=None):
+def annotate_evaluative(clips, num_bins=10, rating_range=None, gamma=0.99):
     """
-    Annotates clips with evaluative ratings based on undiscounted returns.
+    Annotates clips with evaluative ratings based on discounted returns.
     Uses a fixed rating range for Hopper, otherwise calculates it from the clips.
     """
     evaluative_data = []
@@ -79,19 +79,20 @@ def annotate_evaluative(clips, num_bins=10, rating_range=None):
         min_return, max_return = rating_range
     bin_edges = np.linspace(min_return, max_return, num_bins + 1)
     for clip in clips:
-        undiscounted_return = calculate_return(clip)
-        print(f"Undiscounted return for clip: {undiscounted_return}")
-        returns.append(undiscounted_return)
-        clipped_return = np.clip(undiscounted_return, min_return, max_return)
+        discounted_return = calculate_return(clip, gamma=gamma)
+        print(f"Discounted return for clip: {discounted_return}")
+        returns.append(discounted_return)
+        clipped_return = np.clip(discounted_return, min_return, max_return)
         print(f"Clipped return: {clipped_return}")
         rating = np.digitize(clipped_return, bin_edges[1:-1])
         print(f"Rating for clip: {rating}")
         evaluative_data.append((clip, float(rating)))
     return evaluative_data, returns, bin_edges
 
-def calculate_return(clip):
+def calculate_return(clip, gamma=0.99):
     """
-    Calculate the undiscounted return for a trajectory segment.
-    R(ξ) = Σ(t=0 to L-1) r_t
+    Calculate the discounted return for a trajectory segment.
+    R(ξ) = Σ(t=0 to L-1) gamma^t * r_t
     """
-    return sum(clip["rews"])
+    rewards = clip["rews"]
+    return sum(r * (gamma ** i) for i, r in enumerate(rewards))
