@@ -5,25 +5,52 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 
 class RewardModel(nn.Module):
-    def __init__(self, obs_dim, act_dim, dropout_prob=0.1, hidden=None):
+    def __init__(self, obs_dim, act_dim, dropout_prob=0.1, hidden=None, probabilistic=False):
         super().__init__()
-        self.net = nn.Sequential(
+        self.probabilistic = probabilistic
+        
+        # Shared feature extractor
+        self.feature_net = nn.Sequential(
             nn.Linear(obs_dim + act_dim, 64), nn.LeakyReLU(),
             nn.Dropout(dropout_prob),
             nn.Linear(64, 64), nn.LeakyReLU(),
             nn.Dropout(dropout_prob),
-            nn.Linear(64, 1)
         )
+        
+        if self.probabilistic:
+            # Separate heads for mean and variance
+            self.mean_head = nn.Linear(64, 1)
+            self.var_head = nn.Sequential(
+                nn.Linear(64, 1),
+                nn.Softplus()  # Ensures positive variance
+            )
+        else:
+            # Original deterministic head
+            self.net = nn.Sequential(
+                self.feature_net,
+                nn.Linear(64, 1)
+            )
 
     def forward(self, states, actions):
         x = torch.cat([states, actions], dim=-1)
-        return self.net(x).squeeze(-1)
+        
+        if self.probabilistic:
+            features = self.feature_net(x)
+            mean = self.mean_head(features).squeeze(-1)
+            var = self.var_head(features).squeeze(-1)
+            return mean, var
+        else:
+            return self.net(x).squeeze(-1)
 
     def predict_reward(self, obs, action):
         s = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
         a = torch.tensor(action, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
-            return self.forward(s, a).item()
+            if self.probabilistic:
+                mean, var = self.forward(s, a)
+                return mean.item()  # Return mean for compatibility
+            else:
+                return self.forward(s, a).item()
         
 def calculate_discounted_reward_for_predictions(rewards, gamma):
     """
@@ -70,8 +97,17 @@ def train_reward_model_batched(
                 s1, a1, s2, a2, pref = batch
                 s1, a1, s2, a2, pref = s1.to(device), a1.to(device), s2.to(device), a2.to(device), pref.to(device)
                 optimizer.zero_grad()
-                r1 = model(s1, a1).sum(dim=1)
-                r2 = model(s2, a2).sum(dim=1)
+                
+                if model.probabilistic:
+                    # Use only mean for preferences, ignore variance
+                    r1_mean, r1_var = model(s1, a1)
+                    r2_mean, r2_var = model(s2, a2)
+                    r1 = r1_mean.sum(dim=1)
+                    r2 = r2_mean.sum(dim=1)
+                else:
+                    r1 = model(s1, a1).sum(dim=1)
+                    r2 = model(s2, a2).sum(dim=1)
+                    
                 logits = r1 - r2
                 loss = nn.BCEWithLogitsLoss()(logits, pref)
                 # L2 regularization on rewards
@@ -88,11 +124,18 @@ def train_reward_model_batched(
                 states, actions, ratings = batch
                 states, actions, ratings = states.to(device), actions.to(device), ratings.to(device)
                 optimizer.zero_grad()
-                per_step_rewards = model(states, actions)
-                predicted_segment_rewards = per_step_rewards.sum(dim=1)
-                # if rating_scale is not None:
-                #     predicted_segment_rewards = torch.sigmoid(predicted_segment_rewards) * rating_scale
-                loss = nn.MSELoss()(predicted_segment_rewards, ratings)
+                
+                if model.probabilistic:
+                    # Use Gaussian NLL loss for evaluative feedback
+                    mean_rewards, var_rewards = model(states, actions)
+                    predicted_mean = mean_rewards.sum(dim=1)
+                    predicted_var = var_rewards.sum(dim=1)
+                    # Gaussian Negative Log Likelihood Loss
+                    loss = nn.GaussianNLLLoss()(predicted_mean, ratings, predicted_var)
+                else:
+                    predicted_segment_rewards = model(states, actions).sum(dim=1)
+                    loss = nn.MSELoss()(predicted_segment_rewards, ratings)
+                    
                 total_loss = loss
                 total_loss.backward()
                 optimizer.step()
@@ -115,8 +158,16 @@ def train_reward_model_batched(
                 if feedback_type == "preference":
                     s1, a1, s2, a2, pref = batch
                     s1, a1, s2, a2, pref = s1.to(device), a1.to(device), s2.to(device), a2.to(device), pref.to(device)
-                    r1 = model(s1, a1).sum(dim=1)
-                    r2 = model(s2, a2).sum(dim=1)
+                    
+                    if model.probabilistic:
+                        r1_mean, r1_var = model(s1, a1)
+                        r2_mean, r2_var = model(s2, a2)
+                        r1 = r1_mean.sum(dim=1)
+                        r2 = r2_mean.sum(dim=1)
+                    else:
+                        r1 = model(s1, a1).sum(dim=1)
+                        r2 = model(s2, a2).sum(dim=1)
+                        
                     logits = r1 - r2
                     val_loss += nn.BCEWithLogitsLoss()(logits, pref).item()
                     
@@ -127,11 +178,16 @@ def train_reward_model_batched(
                 elif feedback_type == "evaluative":
                     states, actions, ratings = batch
                     states, actions, ratings = states.to(device), actions.to(device), ratings.to(device)
-                    per_step_rewards = model(states, actions)
-                    predicted_segment_rewards = per_step_rewards.sum(dim=1)
-                    # if rating_scale is not None:
-                    #     predicted_segment_rewards = torch.sigmoid(predicted_segment_rewards) * rating_scale
-                    val_loss += nn.MSELoss()(predicted_segment_rewards, ratings).item()
+                    
+                    if model.probabilistic:
+                        mean_rewards, var_rewards = model(states, actions)
+                        predicted_mean = mean_rewards.sum(dim=1)
+                        predicted_var = var_rewards.sum(dim=1)
+                        val_loss += nn.GaussianNLLLoss()(predicted_mean, ratings, predicted_var).item()
+                    else:
+                        per_step_rewards = model(states, actions)
+                        predicted_segment_rewards = per_step_rewards.sum(dim=1)
+                        val_loss += nn.MSELoss()(predicted_segment_rewards, ratings).item()
                     total += ratings.size(0)
         
         avg_val_loss = val_loss / len(val_loader)
@@ -160,4 +216,3 @@ def train_reward_model_batched(
     
     return model, iteration
 
-        
