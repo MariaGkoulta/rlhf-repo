@@ -4,6 +4,9 @@ import numpy as np
 import random
 import os
 import matplotlib.pyplot as plt
+from scipy.stats import norm
+from scipy.special import logsumexp
+import math
 
 def stack_obs_acts(clip, device='cpu'):
     obs = torch.tensor(np.stack(clip['obs']), dtype=torch.float32, device=device)
@@ -16,8 +19,14 @@ def bald_score(model, clip1, clip2, T=10, device='cpu'):
     s1, a1 = stack_obs_acts(clip1, device)
     s2, a2 = stack_obs_acts(clip2, device)
     for _ in range(T):
-        r1 = model(s1, a1).sum()
-        r2 = model(s2, a2).sum()
+        if hasattr(model, 'probabilistic') and model.probabilistic:
+            r1_mean, r1_var = model(s1, a1)
+            r2_mean, r2_var = model(s2, a2)
+            r1 = r1_mean.sum()
+            r2 = r2_mean.sum()
+        else:
+            r1 = model(s1, a1).sum()
+            r2 = model(s2, a2).sum()
         p  = torch.sigmoid(r1 - r2)
         probs.append(p.item())
     probs = np.array(probs)
@@ -72,31 +81,48 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     idxs = np.argsort(scores)[-actual_K:]
     return [pairs[i] for i in idxs]
 
+def mixture_entropy(mus, vars, n_samples=None, device=None):
+    if device is None:
+        device = mus.device
+    M = mus.shape[0]
+    comp_idx = torch.randint(0, M, (n_samples,), device=device)
+    y = torch.normal(mus[comp_idx], torch.sqrt(vars[comp_idx]))
+    y_exp   = y.unsqueeze(1)                 # (n_samples, 1)
+    mus_exp = mus.unsqueeze(0)               # (1, M)
+    vars_exp = vars.unsqueeze(0)               # (1, M)
+    # Analytic log‑pdf of Gaussian
+    #   log N(y | μ_j, σ_j^2) = -½[ log(2πσ_j^2) + (y−μ_j)^2/σ_j^2 ]
+    log_probs = -0.5 * (torch.log(2 * torch.tensor(math.pi) * vars_exp)
+                       + (y_exp - mus_exp)**2 / vars_exp)
+    # 4) Compute log p(y_i) under the mixture via log‑sum‑exp
+    log_mixture = torch.logsumexp(log_probs, dim=1) - torch.log(torch.tensor(M, device=device))
+    # 5) Estimate entropy: –E[ log p(y) ]
+    return -log_mixture.mean()
+
 def evaluative_bald_score(model, clip, T=10, device='cpu', rating_range=(0, 10), num_bins=10):
     """
-    Calculates the BALD score for a clip for evaluative feedback.
+    Calculates the BALD score for a clip for evaluative feedback using the regression formulation.
     BALD(x) = H[E_θ[p(y|x,θ)]] - E_θ[H[p(y|x,θ)]]
-    where y is the rating bin.
+    where y is the predicted return (a continuous value).
+    This implementation is for a probabilistic model that outputs mean and variance.
     """
-    model.train()
+    if not (hasattr(model, 'probabilistic') and model.probabilistic):
+        raise ValueError("The BALD score for regression requires a probabilistic model that outputs both mean and variance.")
+    model.train()  # Enable dropout
     s, a = stack_obs_acts(clip, device)
-    min_return, max_return = rating_range
-    bin_edges = np.linspace(min_return, max_return, num_bins)
-    pred_probs = np.zeros((T, num_bins))
+    mus = torch.zeros(T)
+    sigmas_sq = torch.zeros(T)
     with torch.no_grad():
         for t in range(T):
-            per_step_rewards = model(s, a)
-            undiscounted_return = per_step_rewards.sum().item()
-            bin_idx = np.digitize(undiscounted_return, bin_edges) - 1
-            bin_idx = np.clip(bin_idx, 0, num_bins - 1)
-            pred_probs[t, bin_idx] = 1.0
-    mean_pred_probs = np.mean(pred_probs, axis=0)
-    entropy_of_mean = -np.sum(mean_pred_probs * np.log(mean_pred_probs + 1e-9), axis=-1)
-    # H[p(y|x,θ)]: Entropy of each predictive distribution
-    # Since each p(y|x,θ) is one-hot, its entropy is 0.
-    # E_θ[H[p(y|x,θ)]]: The mean of these entropies is also 0.
-    mean_of_entropies = 0.0
-    bald_score = entropy_of_mean - mean_of_entropies
+            # Get mean and variance for per-step rewards from the model
+            per_step_rewards_mean, per_step_rewards_var = model(s, a)
+            # Summing means and variances for the undiscounted return of the clip
+            # Assumes independence of rewards at each timestep for a given model sample theta_t
+            mus[t] = per_step_rewards_mean.sum().item()
+            sigmas_sq[t] = per_step_rewards_var.sum().item()
+    mean_of_entropies = torch.mean(1/2 * torch.log(2 * torch.pi * torch.e * sigmas_sq))
+    bald_score = mixture_entropy(mus, sigmas_sq, n_samples=T, device=device) - mean_of_entropies
+
     return bald_score
 
 def select_active_clips_for_evaluation(clips, model, K=500, T=10, device='cpu', logger=None, iteration=0, gamma=0.99, rating_range=(0, 10)):
@@ -157,8 +183,14 @@ def variance_score(model, clip1, clip2, T=10, device='cpu'):
     s2, a2 = stack_obs_acts(clip2, device)
     with torch.no_grad():
         for _ in range(T):
-            r1 = model(s1, a1).sum()
-            r2 = model(s2, a2).sum()
+            if hasattr(model, 'probabilistic') and model.probabilistic:
+                r1_mean, r1_var = model(s1, a1)
+                r2_mean, r2_var = model(s2, a2)
+                r1 = r1_mean.sum()
+                r2 = r2_mean.sum()
+            else:
+                r1 = model(s1, a1).sum()
+                r2 = model(s2, a2).sum()
             reward_diffs.append((r1 - r2).item())
     return np.var(reward_diffs)
 
