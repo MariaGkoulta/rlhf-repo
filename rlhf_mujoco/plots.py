@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
 import io
 
+from torch import mode
+
 def plot_correlation_by_bin(clips, reward_model, iteration, results_dir, bin_width=1.0, writer=None):
     true_sums = [sum(c["rews"]) for c in clips]
     predicted_sums = []
@@ -132,19 +134,45 @@ def plot_bins(bins, bin_edges, results_dir=None, iteration=0, writer=None):
         plt.savefig(f"{results_dir}/bins_{iteration}.png")
     plt.close()
 
-def plot_rewards(clip_rewards, results_dir=None, it=0, writer=None):
+def plot_rewards(past_clip_rewards=None, new_clip_rewards=None, results_dir=None, it=0, writer=None, reward_type="true"):
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(clip_rewards, bins=50, color='skyblue', edgecolor='black')
-    ax.set_title(f"Iteration {it} - Distribution of Collected Clip Rewards")
-    ax.set_xlabel("Sum of True Rewards per Clip")
+    
+    # Determine the range for consistent binning
+    all_rewards = []
+    if past_clip_rewards:
+        all_rewards.extend(past_clip_rewards)
+    if new_clip_rewards:
+        all_rewards.extend(new_clip_rewards)
+    
+    if not all_rewards:
+        print("No rewards to plot")
+        return
+    
+    bins = np.linspace(min(all_rewards), max(all_rewards), 50)
+    
+    # Plot past clips if available
+    if past_clip_rewards:
+        ax.hist(past_clip_rewards, bins=bins, color='lightblue', alpha=0.7, edgecolor='black', label='Past Clips')
+    
+    # Plot new clips if available
+    if new_clip_rewards:
+        ax.hist(new_clip_rewards, bins=bins, color='skyblue', alpha=0.8, edgecolor='black', label='New Clips')
+    
+    ax.set_title(f"Iteration {it} - Distribution of {reward_type} Clip Rewards")
+    ax.set_xlabel(f"Sum of {reward_type.title()} Rewards per Clip")
     ax.set_ylabel("Frequency")
     ax.grid(axis='y', alpha=0.75)
-    plot_path_clips = os.path.join(results_dir, f"iter_{it}_clip_rewards_dist.png")
+    
+    # Add legend if we have both types
+    if past_clip_rewards and new_clip_rewards:
+        ax.legend()
+    
+    plot_path_clips = os.path.join(results_dir, f"iter_{it}_{reward_type}_clip_rewards_dist.png")
     fig.savefig(plot_path_clips)
     if writer:
         log_plot_to_tensorboard(fig, writer, plot_path_clips, it)
     plt.close(fig)
-    print(f"Saved clip rewards distribution plot to {plot_path_clips}")
+    print(f"Saved {reward_type} clip rewards distribution plot to {plot_path_clips}")
 
 
 def log_plot_to_tensorboard(fig, writer, tag, step):
@@ -160,22 +188,52 @@ def log_plot_to_tensorboard(fig, writer, tag, step):
     buf.close()
 
 
-def plot_true_vs_pred(true_rewards, pred_rewards, results_dir, iteration, writer=None):
+def plot_true_vs_pred(past_true_rewards=None, past_pred_rewards=None, new_true_rewards=None, new_pred_rewards=None, results_dir=None, it=0, writer=None, reward_type="true"):
     """
     Plots a scatter plot of true vs predicted rewards for an iteration.
     """
     fig, ax = plt.subplots(figsize=(7, 7))
-    ax.scatter(true_rewards, pred_rewards, alpha=0.6, color='purple')
-    ax.set_xlabel("True Episode Reward")
+    
+    # Collect all rewards to determine axis limits
+    all_true = []
+    all_pred = []
+    if past_true_rewards and past_pred_rewards:
+        all_true.extend(past_true_rewards)
+        all_pred.extend(past_pred_rewards)
+    if new_true_rewards and new_pred_rewards:
+        all_true.extend(new_true_rewards)
+        all_pred.extend(new_pred_rewards)
+    
+    if not all_true:
+        print("No rewards to plot for true vs predicted")
+        return
+    
+    # Plot past clips if available
+    if past_true_rewards and past_pred_rewards:
+        ax.scatter(past_true_rewards, past_pred_rewards, alpha=0.6, color='lightcoral', label='Past Clips')
+    
+    # Plot new clips if available
+    if new_true_rewards and new_pred_rewards:
+        ax.scatter(new_true_rewards, new_pred_rewards, alpha=0.8, color='purple', label='New Clips')
+    
+    ax.set_xlabel(f"{reward_type.title()} Episode Reward")
     ax.set_ylabel("Predicted Episode Reward")
-    ax.set_title(f"Iteration {iteration}: True vs Predicted Episode Reward")
+    ax.set_title(f"Iteration {it}: {reward_type.title()} vs Predicted Episode Reward")
     ax.grid(True)
-    ax.plot([min(true_rewards), max(true_rewards)], [min(pred_rewards), max(pred_rewards)], 'r--', label='y=x')
-    ax.legend()
-    out_path = os.path.join(results_dir, f"iter_{iteration}_true_vs_pred.png")
+    
+    # Add diagonal line
+    min_val = min(min(all_true), min(all_pred))
+    max_val = max(max(all_true), max(all_pred))
+    ax.plot([min_val, max_val], [min_val, max_val], 'r--', label='y=x')
+    
+    # Add legend if we have both types or diagonal line
+    if (past_true_rewards and new_true_rewards) or True:  # Always show legend for y=x line
+        ax.legend()
+
+    out_path = os.path.join(results_dir, f"iter_{it}_{reward_type}_vs_pred.png")
     fig.tight_layout()
     fig.savefig(out_path)
     if writer:
-        log_plot_to_tensorboard(fig, writer, out_path, iteration)
+        log_plot_to_tensorboard(fig, writer, out_path, it)
     plt.close(fig)
-    print(f"Saved true vs predicted reward scatter plot to {out_path}")
+    print(f"Saved {reward_type} vs predicted reward scatter plot to {out_path}")
