@@ -33,7 +33,7 @@ from custom_env import LearnedRewardEnv
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
 from torch.utils.tensorboard import SummaryWriter
-from configs.walker import *
+from configs.swimmer import *
 import shutil
 
 if FEEDBACK_TYPE == "evaluative":
@@ -183,7 +183,8 @@ def run_training(
     target_num_segments_if_extracting_initial,
     target_num_segments_if_extracting_per_update,
     initial_min_gap, final_min_gap,
-    max_episode_steps, normalize_rewards, terminate_when_unhealthy
+    max_episode_steps, normalize_rewards, terminate_when_unhealthy,
+    use_probabilistic_model=False  # Add new parameter
 ):
     writer = SummaryWriter(log_dir=run_log_dir)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -245,7 +246,7 @@ def run_training(
     print(f"Initial {FEEDBACK_TYPE} generation with MIN_GAP: {current_min_gap}")
 
     clip_rewards = [clip_return(c) for c in clips_ds]
-    plot_rewards(clip_rewards, results_dir, it=0, writer=writer)
+    plot_rewards(past_clip_rewards=clip_rewards, results_dir=results_dir, it=0, writer=writer)
 
     if FEEDBACK_TYPE == "preference":
         num_rand_initial = initial_target_pairs
@@ -295,7 +296,7 @@ def run_training(
     print(f"Training dataset size: {len(train_dataset)}")
           
     if use_random_sampling or use_bald:
-        reward_model = RewardModel(obs_dim, act_dim, dropout_prob=rm_dropout_prob)
+        reward_model = RewardModel(obs_dim, act_dim, dropout_prob=rm_dropout_prob, probabilistic=use_probabilistic_model)
         optimizer = torch.optim.Adam(reward_model.parameters(), lr=rm_lr, weight_decay=rm_weight_decay)
         reward_model, reward_logger_iteration = train_reward_model_batched(
             reward_model,
@@ -383,18 +384,57 @@ def run_training(
             extract_segments,
             target_num_segments_if_extracting_per_update if extract_segments else None
         )
+
+        import numpy as np
+        def stack_obs_acts(clip, device='cpu'):
+            obs = torch.tensor(np.stack(clip['obs']), dtype=torch.float32, device=device)
+            acts = torch.tensor(np.stack(clip['acts']), dtype=torch.float32, device=device)
+            return obs, acts
+
+        if use_random_sampling or use_bald:
+            if reward_model is None:
+                raise ValueError("Reward model is not initialized. Cannot predict rewards.")
+            past_clip_preds = []
+            for clip in clips_ds:
+                s, a = stack_obs_acts(clip, device)
+                if reward_model.probabilistic:
+                    r_mean, r_var = reward_model(s, a)
+                    r = r_mean.sum().item()
+                else:
+                    r = reward_model(s, a).sum().item()
+                past_clip_preds.append(r)
+            new_clip_preds = []
+            for segment in new_segments:
+                s, a = stack_obs_acts(segment, device)
+                if reward_model.probabilistic:
+                    r_mean, r_var = reward_model(s, a)
+                    r = r_mean.sum().item()
+                else:
+                    r = reward_model(s, a).sum().item()
+                new_clip_preds.append(r)
+        else:
+            raise ValueError("Reward ensemble is not supported in this context. Please use a reward model for prediction.")
+
+        past_clip_rewards = [clip_return(c) for c in clips_ds]
+        new_clip_rewards = [clip_return(c) for c in new_segments]
+        plot_rewards(past_clip_rewards=past_clip_rewards, new_clip_rewards=new_clip_rewards, results_dir=results_dir, it=it, writer=writer, reward_type="true")
+        plot_rewards(past_clip_rewards=past_clip_preds, new_clip_rewards=new_clip_preds, results_dir=results_dir, it=it, writer=writer, reward_type="predicted")
+
+
+        plot_true_vs_pred(past_true_rewards=past_clip_rewards, past_pred_rewards=past_clip_preds,
+                          new_true_rewards=new_clip_rewards, new_pred_rewards=new_clip_preds,
+                          results_dir=results_dir, it=it, writer=writer)
+
         clips_ds.extend(new_segments)
 
         all_results = vec_env.env_method("get_and_clear_episode_rewards")
         true_rewards = [r for res in all_results for r in res[0]]
         pred_rewards = [r for res in all_results for r in res[1]]
         if true_rewards and pred_rewards:
-            plot_true_vs_pred(true_rewards, pred_rewards, results_dir, it, writer=writer)
+            plot_true_vs_pred(past_true_rewards=true_rewards, past_pred_rewards=pred_rewards, results_dir=results_dir, it=it, writer=writer, reward_type="from ppo episode rewards")
         else:
             print(f"Iteration {it}: Not enough true/predicted rewards to plot true vs pred.")
 
-        segment_rewards_for_plot = [clip_return(c) for c in new_segments]
-        plot_rewards(segment_rewards_for_plot, results_dir, it, writer=writer)
 
         num_iters_left = (total_ppo_timesteps - T_cumulative_ppo_steps_in_loop) / ppo_timesteps_per_iter
         remaining_needed_overall = total_target_pairs - len(train_dataset)
@@ -408,7 +448,7 @@ def run_training(
         if FEEDBACK_TYPE == "preference":
             if target_points_this_iter > 0 and clips_ds:
                 num_rand_iter_loop = target_points_this_iter
-        
+
                 if use_random_sampling:
                     new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop, current_min_gap)
                     print(f"Iteration {it}: sampled {len(new_prefs)}.")
@@ -434,7 +474,6 @@ def run_training(
 
                         if rewards_log:
                             plot_preference_heatmap(rewards_log, results_dir, it, range_min=-20, range_max=-2)
-
                     print(f"Iteration {it}: Targeted {target_points_this_iter} bald pairs, sampled {len(new_prefs)}.")
         
                 if use_ensemble:
@@ -666,7 +705,8 @@ def main():
         final_min_gap=FINAL_MIN_GAP,
         max_episode_steps=MAX_EPISODE_STEPS,
         normalize_rewards=NORMALIZE_REWARDS,
-        terminate_when_unhealthy=TERMINATE_WHEN_UNHEALTHY
+        terminate_when_unhealthy=TERMINATE_WHEN_UNHEALTHY,
+        use_probabilistic_model=USE_PROBABILISTIC_MODEL
     )
 
 
