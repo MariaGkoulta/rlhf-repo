@@ -11,7 +11,6 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import VecMonitor
 from gymnasium.wrappers import TimeLimit
 from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
 
 from preferences import (
     PreferenceDataset, clip_return,
@@ -33,7 +32,7 @@ from custom_env import LearnedRewardEnv
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
 from torch.utils.tensorboard import SummaryWriter
-from configs.swimmer import *
+from configs.cheetah import *
 import shutil
 
 if FEEDBACK_TYPE == "evaluative":
@@ -80,6 +79,7 @@ def collect_clips(policy, num_episodes_to_collect, env_id="Reacher-v4", n_envs=8
     vec_env.close()
     return collected_episodes[:num_episodes_to_collect]
 
+
 def extract_segments_from_episodes(
     episodes, 
     segment_len, 
@@ -94,7 +94,7 @@ def extract_segments_from_episodes(
         segment_len: The desired length for output segments.
         extract_multiple_segments: Boolean flag. If True, sample target_num_segments_if_multiple.
                                    If False, sample one segment per sufficiently long episode.
-        target_num_segments_if_multiple: Integer, only used if extract_multiple_segments is True.
+        target_num_segments_if_extracting_multiple: Integer, only used if extract_multiple_segments is True.
 
     Returns:
         A list of segments.
@@ -184,23 +184,25 @@ def run_training(
     target_num_segments_if_extracting_per_update,
     initial_min_gap, final_min_gap,
     max_episode_steps, normalize_rewards, terminate_when_unhealthy,
-    use_probabilistic_model=False  # Add new parameter
+    use_probabilistic_model=False,  # Add new parameter
+    use_ground_truth=False
 ):
     writer = SummaryWriter(log_dir=run_log_dir)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    if FEEDBACK_TYPE == "preference":
-        train_pref_ds = PreferenceDataset(device=device, segment_len=final_segment_len)
-        val_pref_ds = PreferenceDataset(device=device, segment_len=final_segment_len)
-        train_dataset = train_pref_ds
-        val_dataset = val_pref_ds
-    elif FEEDBACK_TYPE == "evaluative":
-        train_eval_ds = EvaluativeDataset(device=device, segment_len=final_segment_len)
-        val_eval_ds = EvaluativeDataset(device=device, segment_len=final_segment_len)
-        train_dataset = train_eval_ds
-        val_dataset = val_eval_ds
-    else:
-        raise ValueError(f"Unsupported feedback type: {FEEDBACK_TYPE}")
+    if not use_ground_truth:
+        if FEEDBACK_TYPE == "preference":
+            train_pref_ds = PreferenceDataset(device=device, segment_len=final_segment_len)
+            val_pref_ds = PreferenceDataset(device=device, segment_len=final_segment_len)
+            train_dataset = train_pref_ds
+            val_dataset = val_pref_ds
+        elif FEEDBACK_TYPE == "evaluative":
+            train_eval_ds = EvaluativeDataset(device=device, segment_len=final_segment_len)
+            val_eval_ds = EvaluativeDataset(device=device, segment_len=final_segment_len)
+            train_dataset = train_eval_ds
+            val_dataset = val_eval_ds
+        else:
+            raise ValueError(f"Unsupported feedback type: {FEEDBACK_TYPE}")
 
     raw_env = None
     if env_id in UNHEALTHY_TERMINATION_ENVS:
@@ -224,67 +226,68 @@ def run_training(
     policy.learn(total_timesteps=initial_policy_ts)
     time_limited_raw_env.close()
 
-    initial_full_episodes = collect_clips(policy, num_episodes_to_collect_initial, env_id=env_id, max_episode_steps=max_episode_steps)
-    clips_ds = []
-    if extract_segments:
-        clips_ds = extract_segments_from_episodes(
-            initial_full_episodes,
-            segment_len=segment_len,
-            extract_multiple_segments=True,
-            target_num_segments_if_multiple=target_num_segments_if_extracting_initial
-    )
-    else:
-        clips_ds = initial_full_episodes
-    print(f"Collected {len(initial_full_episodes)} initial full episodes.")
-    for i, episode_data in enumerate(initial_full_episodes):
-        print(f"  Initial Episode {i+1} length: {len(episode_data['acts'])}")
-
-    initial_target_pairs = int(total_target_pairs * initial_collection_fraction)
-    print(f"Targeting {initial_target_pairs} initial {FEEDBACK_TYPE} data points.")
-
-    current_min_gap = initial_min_gap
-    print(f"Initial {FEEDBACK_TYPE} generation with MIN_GAP: {current_min_gap}")
-
-    clip_rewards = [clip_return(c) for c in clips_ds]
-    plot_rewards(past_clip_rewards=clip_rewards, results_dir=results_dir, it=0, writer=writer)
-
-    if FEEDBACK_TYPE == "preference":
-        num_rand_initial = initial_target_pairs
-        print(f"Initial collection (random): targeting num_rand_initial = {num_rand_initial}")
-        if len(clips_ds) >= 2: 
-                _prefs_list = sample_random_preferences(clips_ds, num_rand_initial, current_min_gap) # Use calculated value
-                prefs = _prefs_list
+    if not use_ground_truth:
+        initial_full_episodes = collect_clips(policy, num_episodes_to_collect_initial, env_id=env_id, max_episode_steps=max_episode_steps)
+        clips_ds = []
+        if extract_segments:
+            clips_ds = extract_segments_from_episodes(
+                initial_full_episodes,
+                segment_len=segment_len,
+                extract_multiple_segments=True,
+                target_num_segments_if_multiple=target_num_segments_if_extracting_initial
+        )
         else:
-            print(f"Initial collection (random): clips_ds has fewer than 2 segments ({len(clips_ds)}). Cannot sample pairs.")
+            clips_ds = initial_full_episodes
+        print(f"Collected {len(initial_full_episodes)} initial full episodes.")
+        for i, episode_data in enumerate(initial_full_episodes):
+            print(f"  Initial Episode {i+1} length: {len(episode_data['acts'])}")
 
-        print(f"Generated {len(prefs)} initial preference pairs.")
-        random.shuffle(prefs)
-        val_split_idx = int(len(prefs) * 0.2)
-        val_prefs = prefs[:val_split_idx]
-        train_prefs = prefs[val_split_idx:]
+        initial_target_pairs = int(total_target_pairs * initial_collection_fraction)
+        print(f"Targeting {initial_target_pairs} initial {FEEDBACK_TYPE} data points.")
 
-        for c1, c2, p in train_prefs:
-            train_pref_ds.add(c1, c2, p)
-        for c1, c2, p in val_prefs:
-            val_pref_ds.add(c1, c2, p)
-        
-        print(f"Split initial preferences into {len(train_pref_ds)} training and {len(val_pref_ds)} validation pairs.")
-    
-    elif FEEDBACK_TYPE == "evaluative":
-        evaluative_data = sample_evaluative_data(clips_ds, initial_target_pairs)
-        print(f"Generated {len(evaluative_data)} initial evaluative data points.")
-        
-        random.shuffle(evaluative_data)
-        val_split_idx = int(len(evaluative_data) * 0.2)
-        val_eval_data = evaluative_data[:val_split_idx]
-        train_eval_data = evaluative_data[val_split_idx:]
+        current_min_gap = initial_min_gap
+        print(f"Initial {FEEDBACK_TYPE} generation with MIN_GAP: {current_min_gap}")
 
-        for clip, rating in train_eval_data:
-            train_eval_ds.add(clip, rating)
-        for clip, rating in val_eval_data:
-            val_eval_ds.add(clip, rating)
+        clip_rewards = [clip_return(c) for c in clips_ds]
+        plot_rewards(past_clip_rewards=clip_rewards, results_dir=results_dir, it=0, writer=writer)
+
+        if FEEDBACK_TYPE == "preference":
+            num_rand_initial = initial_target_pairs
+            print(f"Initial collection (random): targeting num_rand_initial = {num_rand_initial}")
+            if len(clips_ds) >= 2: 
+                    _prefs_list = sample_random_preferences(clips_ds, num_rand_initial, current_min_gap) # Use calculated value
+                    prefs = _prefs_list
+            else:
+                print(f"Initial collection (random): clips_ds has fewer than 2 segments ({len(clips_ds)}). Cannot sample pairs.")
+
+            print(f"Generated {len(prefs)} initial preference pairs.")
+            random.shuffle(prefs)
+            val_split_idx = int(len(prefs) * 0.2)
+            val_prefs = prefs[:val_split_idx]
+            train_prefs = prefs[val_split_idx:]
+
+            for c1, c2, p in train_prefs:
+                train_pref_ds.add(c1, c2, p)
+            for c1, c2, p in val_prefs:
+                val_pref_ds.add(c1, c2, p)
+            
+            print(f"Split initial preferences into {len(train_pref_ds)} training and {len(val_pref_ds)} validation pairs.")
         
-        print(f"Split initial evaluative data into {len(train_eval_ds)} training and {len(val_eval_ds)} validation samples.")
+        elif FEEDBACK_TYPE == "evaluative":
+            evaluative_data = sample_evaluative_data(clips_ds, initial_target_pairs)
+            print(f"Generated {len(evaluative_data)} initial evaluative data points.")
+            
+            random.shuffle(evaluative_data)
+            val_split_idx = int(len(evaluative_data) * 0.2)
+            val_eval_data = evaluative_data[:val_split_idx]
+            train_eval_data = evaluative_data[val_split_idx:]
+
+            for clip, rating in train_eval_data:
+                train_eval_ds.add(clip, rating)
+            for clip, rating in val_eval_data:
+                val_eval_ds.add(clip, rating)
+            
+            print(f"Split initial evaluative data into {len(train_eval_ds)} training and {len(val_eval_ds)} validation samples.")
 
     obs_dim = policy.observation_space.shape[0]
     act_dim = policy.action_space.shape[0]
@@ -293,40 +296,41 @@ def run_training(
     reward_model = None
     reward_ensemble = None
     optimizer = None
-    print(f"Training dataset size: {len(train_dataset)}")
-          
-    if use_random_sampling or use_bald:
-        reward_model = RewardModel(obs_dim, act_dim, dropout_prob=rm_dropout_prob, probabilistic=use_probabilistic_model)
-        optimizer = torch.optim.Adam(reward_model.parameters(), lr=rm_lr, weight_decay=rm_weight_decay)
-        reward_model, reward_logger_iteration = train_reward_model_batched(
-            reward_model,
-            train_dataset,
-            val_dataset,
-            device=device,
-            epochs=rm_epochs,
-            patience=rm_patience,
-            optimizer=optimizer,
-            regularization_weight=rm_reg_weight,
-            logger=policy.logger,
-            iteration=reward_logger_iteration,
-            feedback_type=FEEDBACK_TYPE,
-            rating_scale=EVALUATIVE_RATING_SCALE
-        )
-    else: 
-        reward_ensemble = RewardEnsemble(obs_dim, act_dim, num_models=reward_ensembles, dropout_prob=rm_dropout_prob)
-        reward_ensemble.train_ensemble(
-            train_dataset,
-            val_dataset,
-            device=device,
-            epochs=rm_epochs,
-            patience=rm_patience,
-            optimizer_lr=rm_lr,
-            optimizer_wd=rm_weight_decay,
-            regularization_weight=rm_reg_weight,
-            logger=policy.logger,
-            iteration=reward_logger_iteration,
-            feedback_type=FEEDBACK_TYPE
-        )
+    if not use_ground_truth:
+        print(f"Training dataset size: {len(train_dataset)}")
+            
+        if use_random_sampling or use_bald:
+            reward_model = RewardModel(obs_dim, act_dim, dropout_prob=rm_dropout_prob, probabilistic=use_probabilistic_model)
+            optimizer = torch.optim.Adam(reward_model.parameters(), lr=rm_lr, weight_decay=rm_weight_decay)
+            reward_model, reward_logger_iteration = train_reward_model_batched(
+                reward_model,
+                train_dataset,
+                val_dataset,
+                device=device,
+                epochs=rm_epochs,
+                patience=rm_patience,
+                optimizer=optimizer,
+                regularization_weight=rm_reg_weight,
+                logger=policy.logger,
+                iteration=reward_logger_iteration,
+                feedback_type=FEEDBACK_TYPE,
+                rating_scale=EVALUATIVE_RATING_SCALE
+            )
+        else: 
+            reward_ensemble = RewardEnsemble(obs_dim, act_dim, num_models=reward_ensembles, dropout_prob=rm_dropout_prob)
+            reward_ensemble.train_ensemble(
+                train_dataset,
+                val_dataset,
+                device=device,
+                epochs=rm_epochs,
+                patience=rm_patience,
+                optimizer_lr=rm_lr,
+                optimizer_wd=rm_weight_decay,
+                regularization_weight=rm_reg_weight,
+                logger=policy.logger,
+                iteration=reward_logger_iteration,
+                feedback_type=FEEDBACK_TYPE
+            )
 
     def make_wrapped():
         if env_id in UNHEALTHY_TERMINATION_ENVS:
@@ -338,6 +342,8 @@ def run_training(
         e_time_limited = TimeLimit(wrapped_base_raw_env, max_episode_steps=max_episode_steps)
         e_monitored = Monitor(e_time_limited)
 
+        if use_ground_truth:
+            return e_monitored
         if use_random_sampling or use_bald:
             return LearnedRewardEnv(e_monitored, reward_model, normalize_rewards=normalize_rewards)
         else:
@@ -347,7 +353,9 @@ def run_training(
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False, gamma=policy.gamma)
     vec_env = VecMonitor(vec_env)
     policy.set_env(vec_env)
-    callback = TrueRewardCallback(verbose=1)
+    
+    # Only use TrueRewardCallback when not using ground truth
+    callback = None if use_ground_truth else TrueRewardCallback(verbose=1)
 
     it = 0
     T_cumulative_ppo_steps_in_loop = 0
@@ -355,14 +363,15 @@ def run_training(
     while T_cumulative_ppo_steps_in_loop < total_ppo_timesteps:
         it += 1
         
-        fraction_ppo_training_done = min(1.0, max(0.0, T_cumulative_ppo_steps_in_loop / total_ppo_timesteps))
-        current_min_gap = initial_min_gap - (initial_min_gap - final_min_gap) * fraction_ppo_training_done
-        current_min_gap = max(current_min_gap, final_min_gap)
-        
-        if FEEDBACK_TYPE == "preference":
-            print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{total_ppo_timesteps}, Using MIN_GAP: {current_min_gap:.2f}, Total Prefs: {len(train_dataset)+len(val_dataset)}/{total_target_pairs}")
-        else:
-            print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{total_ppo_timesteps}, Total Evaluative Data: {len(train_dataset)+len(val_dataset)}/{total_target_pairs}")
+        if not use_ground_truth:
+            fraction_ppo_training_done = min(1.0, max(0.0, T_cumulative_ppo_steps_in_loop / total_ppo_timesteps))
+            current_min_gap = initial_min_gap - (initial_min_gap - final_min_gap) * fraction_ppo_training_done
+            current_min_gap = max(current_min_gap, final_min_gap)
+            
+            if FEEDBACK_TYPE == "preference":
+                print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{total_ppo_timesteps}, Using MIN_GAP: {current_min_gap:.2f}, Total Prefs: {len(train_dataset)+len(val_dataset)}/{total_target_pairs}")
+            else:
+                print(f"Iteration {it}: PPO Timesteps {T_cumulative_ppo_steps_in_loop}/{total_ppo_timesteps}, Total Evaluative Data: {len(train_dataset)+len(val_dataset)}/{total_target_pairs}")
         
         policy.learn(
             total_timesteps=ppo_timesteps_per_iter,
@@ -371,6 +380,20 @@ def run_training(
         )
 
         T_cumulative_ppo_steps_in_loop += ppo_timesteps_per_iter
+
+        if use_ground_truth:
+            # For ground truth, get episode rewards from VecMonitor
+            all_episode_rewards = []
+            for env_idx in range(vec_env.num_envs):
+                if hasattr(vec_env, 'get_episode_rewards') and callable(getattr(vec_env, 'get_episode_rewards')):
+                    episode_rewards = vec_env.get_episode_rewards()
+                    all_episode_rewards.extend(episode_rewards)
+            
+            if all_episode_rewards:
+                mean_episode_reward = sum(all_episode_rewards) / len(all_episode_rewards)
+                policy.logger.record("eval/mean_true_reward", mean_episode_reward)
+                print(f"Ground truth mean episode reward: {mean_episode_reward}")
+            continue
 
         current_segment_len = int(initial_segment_len + (final_segment_len - initial_segment_len) * fraction_ppo_training_done)
         policy.logger.record("params/segment_length", current_segment_len)
@@ -521,7 +544,7 @@ def run_training(
                         rating_range=EVALUATIVE_RATING_RANGE,
                     )
                     print(f"Iteration {it}: BALD selected {len(new_evaluative_data)} clips for evaluation.")
-                else: # Fallback to random sampling for evaluative feedback
+                else:  # Fallback to random sampling for evaluative feedback
                     new_evaluative_data = sample_evaluative_data(clips_ds, target_points_this_iter)
                     print(f"Iteration {it}: Randomly generated {len(new_evaluative_data)} new evaluative data points.")
 
@@ -575,11 +598,12 @@ def run_training(
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     policy.save(os.path.join(results_dir, f"ppo_final_{timestamp}.zip"))
-    final_model = reward_ensemble if use_ensemble else reward_model
-    torch.save(
-        final_model.state_dict(),
-        os.path.join(results_dir, f"rm_final_{timestamp}.pth")
-    )
+    if not use_ground_truth:
+        final_model = reward_ensemble if use_ensemble else reward_model
+        torch.save(
+            final_model.state_dict(),
+            os.path.join(results_dir, f"rm_final_{timestamp}.pth")
+        )
 
     video_folder = os.path.join(results_dir, "final_eval_video")
     os.makedirs(video_folder, exist_ok=True)
@@ -624,8 +648,11 @@ def main():
                        help="sample preference pairs via BALD active learning")
     group.add_argument("--ensemble", action="store_true",
                        help="sample preference pairs via ensemble-based active learning")
+    group.add_argument("--ground-truth", action="store_true",
+                       help="run with ground truth reward")
     args = parser.parse_args()
 
+    use_ground_truth = False
     if args.bald:
         experiment_type = "active_bald"
         use_bald = True
@@ -636,11 +663,23 @@ def main():
         use_bald = False
         use_ensemble = True
         use_random_sampling = False
-    else:
+    elif args.ground_truth:
+        experiment_type = "ground_truth"
+        use_bald = False
+        use_ensemble = False
+        use_random_sampling = False
+        use_ground_truth = True
+    else: # random
         experiment_type = "random"
         use_bald = False
         use_ensemble = False
         use_random_sampling = True
+    
+    model_type = ''
+    if USE_PROBABILISTIC_MODEL:
+        model_type = "probabilistic"
+    else:
+        model_type = "nonprobabilistic"
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     experiment_time = datetime.datetime.now().strftime("%Y-%m-%d %H")
@@ -659,7 +698,7 @@ def main():
     shutil.copyfile(config_src, config_dst)
 
     shared_log_dir = f"./logs/{experiment_time}/{env_id}/"
-    run_log_dir = f"{shared_log_dir}{experiment_type}_{timestamp}/"
+    run_log_dir = f"{shared_log_dir}{experiment_type}_{timestamp}_{model_type}_{FEEDBACK_TYPE}/"
 
     if use_bald:
         rm_dropout_prob = BALD_REWARD_MODEL_DROPOUT_PROB
@@ -706,7 +745,8 @@ def main():
         max_episode_steps=MAX_EPISODE_STEPS,
         normalize_rewards=NORMALIZE_REWARDS,
         terminate_when_unhealthy=TERMINATE_WHEN_UNHEALTHY,
-        use_probabilistic_model=USE_PROBABILISTIC_MODEL
+        use_probabilistic_model=USE_PROBABILISTIC_MODEL,
+        use_ground_truth=use_ground_truth
     )
 
 

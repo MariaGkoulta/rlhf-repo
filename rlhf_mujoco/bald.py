@@ -20,10 +20,11 @@ def bald_score(model, clip1, clip2, T=10, device='cpu'):
     s2, a2 = stack_obs_acts(clip2, device)
     for _ in range(T):
         if hasattr(model, 'probabilistic') and model.probabilistic:
-            r1_mean, r1_var = model(s1, a1)
-            r2_mean, r2_var = model(s2, a2)
-            r1 = r1_mean.sum()
-            r2 = r2_mean.sum()
+            # Re-run feature extraction to apply dropout stochastically
+            f1 = model.feature_net(torch.cat([s1, a1], dim=-1))
+            f2 = model.feature_net(torch.cat([s2, a2], dim=-1))
+            r1 = model.mean_head(f1).sum()
+            r2 = model.mean_head(f2).sum()
         else:
             r1 = model(s1, a1).sum()
             r2 = model(s2, a2).sum()
