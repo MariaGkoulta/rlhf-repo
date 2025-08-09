@@ -8,6 +8,11 @@ from scipy.stats import norm
 from scipy.special import logsumexp
 import math
 
+# NORMALIZATION FLAGS FOR BALD SCORES
+PREF_BALD_NORM_BY_LOG2 = True       # divide preference BALD by log(2) to map to [0,1]
+EVAL_BALD_NORM_PERCENTILE = 99      # high percentile for evaluative‐BALD normalization
+_eval_bald_high = 1e-8              # running high value for evaluative‐BALD
+
 def stack_obs_acts(clip, device='cpu'):
     obs = torch.tensor(np.stack(clip['obs']), dtype=torch.float32, device=device)
     acts = torch.tensor(np.stack(clip['acts']), dtype=torch.float32, device=device)
@@ -36,7 +41,12 @@ def bald_score(model, clip1, clip2, T=10, device='cpu'):
     # expected entropy
     H_t = - (probs*np.log(probs+1e-8) + (1-probs)*np.log(1-probs+1e-8))
     E_H   = H_t.mean()
-    return H_mean - E_H
+
+    # raw BALD (nats); normalize to bits if requested
+    raw = H_mean - E_H
+    if PREF_BALD_NORM_BY_LOG2:
+        raw = raw / math.log(2)
+    return raw
 
 def sample_random_pairs(clips, num_pairs, min_gap):
     """Samples pairs of clips randomly, returning the pairs themselves."""
@@ -81,22 +91,43 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     idxs = np.argsort(scores)[-actual_K:]
     return [pairs[i] for i in idxs]
 
-def get_bald_scores_for_pairs(clips, model, pool_size, T, device, logger=None, iteration=0):
-    """Calculates and returns BALD scores for a pool of candidate pairs."""
+def get_bald_scores_for_pairs(clips, model, pool_size, T, device, logger=None, iteration=0, min_gap=None):
+    """Calculates and returns BALD scores for a pool of candidate pairs.
+       Now supports optional min_gap filtering before scoring to avoid wasting
+       acquisition budget on near-tie pairs that will later be rejected.
+    """
     pair_candidates = set()
-    max_attempts = pool_size * 10
+    max_attempts = pool_size * 20
     attempts = 0
     while len(pair_candidates) < pool_size and attempts < max_attempts:
         c1_idx, c2_idx = random.sample(range(len(clips)), 2)
-        if c1_idx > c2_idx: c1_idx, c2_idx = c2_idx, c1_idx
+        if c1_idx > c2_idx: 
+            c1_idx, c2_idx = c2_idx, c1_idx
+        # Enforce uniqueness
+        if (c1_idx, c2_idx) in pair_candidates:
+            attempts += 1
+            continue
+        # Optional min_gap filtering (cheap true-return diff)
+        if min_gap is not None:
+            rdiff = abs(sum(clips[c1_idx]["rews"]) - sum(clips[c2_idx]["rews"]))
+            if rdiff < min_gap:
+                attempts += 1
+                continue
         pair_candidates.add((c1_idx, c2_idx))
         attempts += 1
+    if not pair_candidates:
+        print("No candidate pairs passed min_gap filtering for BALD.")
+        return [], []
     pairs = [(clips[i], clips[j]) for i, j in pair_candidates]
     scores = [bald_score(model, c1, c2, T, device=device) for c1, c2 in pairs]
-    print(f"Average BALD score for pairs: {np.mean(scores)}")
+    # Sort descending
+    order = np.argsort(scores)[::-1]
+    pairs = [pairs[i] for i in order]
+    scores = [scores[i] for i in order]
+    print(f"Average BALD score for pairs: {np.mean(scores)} (after min_gap filter: {min_gap})")
     if logger is not None:
-        logger.record("active_learning/avg_bald_score", np.mean(scores))
-        logger.record("active_learning/bald_variance", np.var(scores))
+        logger.record("active_learning/avg_bald_score", float(np.mean(scores)))
+        logger.record("active_learning/bald_variance", float(np.var(scores)))
         logger.dump(iteration)
     return pairs, scores
 
@@ -151,6 +182,13 @@ def select_active_clips_for_evaluation(clips, model, K=500, T=10, device='cpu', 
     if not (hasattr(model, 'probabilistic') and model.probabilistic):
         raise ValueError("select_active_clips_for_evaluation requires a probabilistic model. Please set USE_PROBABILISTIC_MODEL to True in your config.")
     scores = [evaluative_bald_score(model, c, T, device=device, rating_range=rating_range) for c in clips]
+
+    # normalize evaluative BALD scores by running high percentile
+    global _eval_bald_high
+    p = np.percentile(scores, EVAL_BALD_NORM_PERCENTILE)
+    _eval_bald_high = max(_eval_bald_high, p)
+    scores = [s / _eval_bald_high for s in scores]
+
     all_rewards = [sum(c["rews"]) for c in clips]
     if logger is not None:
         logger.record("active_learning/avg_evaluative_bald_score", np.mean(scores))
@@ -170,6 +208,18 @@ def get_bald_scores_for_clips(clips, model, T, device, rating_range, num_samples
     else:
         selected_clips = clips
     scores = [evaluative_bald_score(model, c, T, device=device, rating_range=rating_range) for c in selected_clips]
+
+    # normalize evaluative BALD scores by running high percentile
+    global _eval_bald_high
+    p = np.percentile(scores, EVAL_BALD_NORM_PERCENTILE)
+    _eval_bald_high = max(_eval_bald_high, p)
+    print(f"Running high percentile for evaluative BALD: {_eval_bald_high}")
+    scores = [s / _eval_bald_high for s in scores]
+
+    # sort clips by descending BALD score
+    clips = [selected_clips[i] for i in np.argsort(scores)[::-1]]
+    scores = sorted(scores, reverse=True)
+
     print(f"Average BALD score for selected clips: {np.mean(scores)}")
     if logger is not None:
         logger.record("active_learning/avg_evaluative_bald_score", np.mean(scores))
