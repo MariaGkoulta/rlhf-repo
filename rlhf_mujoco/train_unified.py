@@ -14,6 +14,10 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import ConcatDataset
 import numpy as np
+# Active learning balancing hyperparameters
+ACTIVE_PREF_FRACTION = 0.5          # Target fraction of preference items in each BALD acquisition
+MIN_PREF_PER_ITER = 2               # Hard minimum number of preference pairs per iteration when any target points allocated
+RANK_MERGE_ALTERNATE = True         # If True, interleave by rank; else fill quotas greedily within each modality
 
 from preferences import (
     PreferenceDataset, clip_return,
@@ -443,10 +447,18 @@ def run_training(
 
         elif use_bald and target_points_this_iter > 0 and len(clips_ds) > 1:
             print("Acquiring data via BALD from a combined pool.")
-            bald_pool_size = target_points_this_iter * 50 # Create a pool of candidates
-            # 1. Get BALD scores for preference pairs
+            bald_pool_size = target_points_this_iter * 100  # Create a pool of candidates
+
+            # Desired counts per modality (rounded) + minimum safeguard
+            desired_pref = max(MIN_PREF_PER_ITER, int(target_points_this_iter * ACTIVE_PREF_FRACTION))
+            desired_eval = target_points_this_iter - desired_pref
+            if desired_eval < 0:
+                desired_eval = 0
+
+            # 1. Get BALD scores for preference pairs (with min_gap filtering)
             pref_cand_pairs, pref_scores = get_bald_scores_for_pairs(
-                clips_ds, reward_model, pool_size=bald_pool_size, T=bald_t, device=device
+                clips_ds, reward_model, pool_size=bald_pool_size, T=bald_t, device=device,
+                min_gap=current_min_gap
             )
             # 2. Get BALD scores for evaluative clips
             eval_cand_clips, eval_scores = get_bald_scores_for_clips(
@@ -455,34 +467,93 @@ def run_training(
 
             if pref_cand_pairs:
                 print(f"Top preference pairs by BALD score: {np.mean(pref_scores[:5])}")
+            else:
+                print("No preference candidates survived filtering.")
             if eval_cand_clips:
                 print(f"Top evaluative clips by BALD score: {np.mean(eval_scores[:5])}")
+            else:
+                print("No evaluative candidates available.")
 
-            # 3. Combine pools and select top-K based on BALD score
-            combined_pool = []
-            if pref_cand_pairs:
-                combined_pool.extend([('pref', score, pair) for pair, score in zip(pref_cand_pairs, pref_scores)])
-            if eval_cand_clips:
-                combined_pool.extend([('eval', score, clip) for clip, score in zip(eval_cand_clips, eval_scores)])
+            # Normalize within modality by rank (0..1)
+            def rank_normalize(scores):
+                if not scores:
+                    return []
+                arr = np.array(scores)
+                ranks = np.argsort(np.argsort(-arr))  # 0 = best
+                return 1.0 - ranks / max(1, len(arr) - 1)
 
-            if combined_pool:
-                # Sort by score (descending) and take the top items
-                combined_pool.sort(key=lambda x: x[1], reverse=True)
-                top_items = combined_pool[:target_points_this_iter]
+            pref_rank_norm = rank_normalize(pref_scores)
+            eval_rank_norm = rank_normalize(eval_scores)
 
-                # 4. Annotate the selected items
-                selected_pairs = [item[2] for item in top_items if item[0] == 'pref']
-                selected_clips = [item[2] for item in top_items if item[0] == 'eval']
+            # Build modality-specific lists of (norm_score, raw_score, item)
+            pref_list = list(zip(pref_rank_norm, pref_scores, pref_cand_pairs))
+            eval_list = list(zip(eval_rank_norm, eval_scores, eval_cand_clips))
 
-                if selected_pairs:
-                    new_prefs, _, _ = annotate_pairs(selected_pairs, min_gap=current_min_gap)
-                    print(f"Iteration {it}: BALD selected {len(new_prefs)} preference pairs.")
-                
-                if selected_clips:
-                    new_evaluative_data, _, _ = annotate_evaluative(
-                        selected_clips, num_bins=EVALUATIVE_RATING_BINS, rating_range=EVALUATIVE_RATING_RANGE
-                    )
-                    print(f"Iteration {it}: BALD selected {len(new_evaluative_data)} clips for evaluation.")
+            # Selection respecting quotas
+            selected_pairs = []
+            selected_clips = []
+
+            if RANK_MERGE_ALTERNATE:
+                # Alternate taking highest remaining rank from each modality until quotas met
+                pref_idx, eval_idx = 0, 0
+                while (len(selected_pairs) + len(selected_clips)) < target_points_this_iter:
+                    take_pref = (len(selected_pairs) < desired_pref) and pref_idx < len(pref_list)
+                    take_eval = (len(selected_clips) < desired_eval) and eval_idx < len(eval_list)
+
+                    if not take_pref and not take_eval:
+                        # If one modality exhausted, fill from the other (if any left)
+                        if pref_idx < len(pref_list):
+                            take_pref = len(selected_pairs) < desired_pref
+                        elif eval_idx < len(eval_list):
+                            take_eval = len(selected_clips) < desired_eval
+
+                    if take_pref and take_eval:
+                        # Choose the modality with higher normalized rank score next (greedy interleave)
+                        if pref_list[pref_idx][0] >= eval_list[eval_idx][0]:
+                            take_eval = False
+                        else:
+                            take_pref = False
+
+                    if take_pref:
+                        selected_pairs.append(pref_list[pref_idx][2])
+                        pref_idx += 1
+                    elif take_eval:
+                        selected_clips.append(eval_list[eval_idx][2])
+                        eval_idx += 1
+                    else:
+                        break
+            else:
+                # Greedy within each modality independently
+                selected_pairs = [p for _, _, p in pref_list[:desired_pref]]
+                selected_clips = [c for _, _, c in eval_list[:desired_eval]]
+
+            # If quotas not met due to scarcity, backfill from whichever modality still has candidates
+            total_needed = target_points_this_iter - (len(selected_pairs) + len(selected_clips))
+            if total_needed > 0:
+                # Remaining pools (skip already used)
+                remaining_pref = pref_list[len(selected_pairs):]
+                remaining_eval = eval_list[len(selected_clips):]
+                merged_remaining = sorted(
+                    [(m, ns, rs, item) for m, pool in [('pref', remaining_pref), ('eval', remaining_eval)]
+                     for (ns, rs, item) in pool],
+                    key=lambda x: x[1], reverse=True
+                )
+                for m, _, _, item in merged_remaining:
+                    if len(selected_pairs) + len(selected_clips) >= target_points_this_iter:
+                        break
+                    if m == 'pref':
+                        selected_pairs.append(item)
+                    else:
+                        selected_clips.append(item)
+
+            if selected_pairs:
+                new_prefs, _, _ = annotate_pairs(selected_pairs, min_gap=current_min_gap)
+                print(f"Iteration {it}: BALD selected {len(new_prefs)} preference pairs (requested {desired_pref}).")
+            if selected_clips:
+                new_evaluative_data, _, _ = annotate_evaluative(
+                    selected_clips, num_bins=EVALUATIVE_RATING_BINS, rating_range=EVALUATIVE_RATING_RANGE
+                )
+                print(f"Iteration {it}: BALD selected {len(new_evaluative_data)} evaluative clips (requested {desired_eval}).")
         
         # Add newly acquired data to the respective datasets
         if new_prefs:
