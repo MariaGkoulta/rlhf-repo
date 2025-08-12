@@ -62,22 +62,36 @@ def sample_random_pairs(clips, num_pairs, min_gap):
         attempts += 1
     return cand_pairs
 
-def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu', logger=None, iteration=0, results_dir=None): # Added device parameter
-    print(f"Selecting {K} active pairs from {len(clips)} clips with pool size {pool_size} and T={T}")
+def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu', logger=None, iteration=0, results_dir=None, min_gap=0): # Added device parameter & min_gap
+    """Select pairs with highest BALD score subject to a minimum return gap.
+
+    We now enforce the min_gap constraint BEFORE scoring so that no pairs are
+    later discarded for failing the constraint. This prevents wasted BALD
+    computations and ensures exactly the intended number of qualifying pairs
+    (up to availability) are considered.
+    """
+    print(f"Selecting {K} active pairs from {len(clips)} clips with pool size {pool_size}, T={T}, min_gap={min_gap}")
     if len(clips) < 2:
         return []
-    pairs = []
+    # Precompute clip returns for efficiency
+    returns = [sum(c["rews"]) for c in clips]
     pair_candidates = set()
-    number_of_pairs_to_collect = pool_size * 50
-    max_attempts = pool_size * 50
+    number_of_pairs_to_collect = pool_size * 50  # large over-sampling budget
+    max_attempts = pool_size * 200  # allow more attempts when min_gap is restrictive
     attempts = 0
     while len(pair_candidates) < number_of_pairs_to_collect and attempts < max_attempts:
         c1_idx, c2_idx = random.sample(range(len(clips)), 2)
-        if c1_idx > c2_idx: c1_idx, c2_idx = c2_idx, c1_idx
-        pair_candidates.add((c1_idx, c2_idx))
+        if c1_idx > c2_idx:
+            c1_idx, c2_idx = c2_idx, c1_idx
+        # Enforce min_gap here
+        if abs(returns[c1_idx] - returns[c2_idx]) >= min_gap:
+            pair_candidates.add((c1_idx, c2_idx))
         attempts += 1
+    if len(pair_candidates) == 0:
+        print(f"Warning: No candidate pairs met min_gap={min_gap}. Returning empty list.")
+        return []
     pairs = [(clips[i], clips[j]) for i, j in pair_candidates]
-    scores = [bald_score(model, c1, c2, T, device=device) for c1,c2 in pairs]
+    scores = [bald_score(model, c1, c2, T, device=device) for c1, c2 in pairs]
 
     if results_dir:
         plot_bald_diagnostics(pairs, scores, results_dir, iteration)
@@ -91,43 +105,33 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     idxs = np.argsort(scores)[-actual_K:]
     return [pairs[i] for i in idxs]
 
-def get_bald_scores_for_pairs(clips, model, pool_size, T, device, logger=None, iteration=0, min_gap=None):
-    """Calculates and returns BALD scores for a pool of candidate pairs.
-       Now supports optional min_gap filtering before scoring to avoid wasting
-       acquisition budget on near-tie pairs that will later be rejected.
-    """
+def get_bald_scores_for_pairs(clips, model, pool_size, T, device, logger=None, iteration=0, min_gap=0):
+    """Calculates and returns BALD scores for a pool of candidate pairs respecting min_gap."""
+    if len(clips) < 2:
+        return [], []
+    returns = [sum(c["rews"]) for c in clips]
     pair_candidates = set()
-    max_attempts = pool_size * 20
+    max_attempts = pool_size * 50  # allow more tries for restrictive gaps
     attempts = 0
     while len(pair_candidates) < pool_size and attempts < max_attempts:
         c1_idx, c2_idx = random.sample(range(len(clips)), 2)
-        if c1_idx > c2_idx: 
+        if c1_idx > c2_idx:
             c1_idx, c2_idx = c2_idx, c1_idx
-        # Enforce uniqueness
-        if (c1_idx, c2_idx) in pair_candidates:
-            attempts += 1
-            continue
-        # Optional min_gap filtering (cheap true-return diff)
-        if min_gap is not None:
-            rdiff = abs(sum(clips[c1_idx]["rews"]) - sum(clips[c2_idx]["rews"]))
-            if rdiff < min_gap:
-                attempts += 1
-                continue
-        pair_candidates.add((c1_idx, c2_idx))
+        if abs(returns[c1_idx] - returns[c2_idx]) >= min_gap:
+            pair_candidates.add((c1_idx, c2_idx))
         attempts += 1
-    if not pair_candidates:
-        print("No candidate pairs passed min_gap filtering for BALD.")
+    if len(pair_candidates) == 0:
+        print(f"Warning: No candidate pairs met min_gap={min_gap}. Returning empty lists.")
         return [], []
     pairs = [(clips[i], clips[j]) for i, j in pair_candidates]
     scores = [bald_score(model, c1, c2, T, device=device) for c1, c2 in pairs]
-    # Sort descending
     order = np.argsort(scores)[::-1]
     pairs = [pairs[i] for i in order]
     scores = [scores[i] for i in order]
-    print(f"Average BALD score for pairs: {np.mean(scores)} (after min_gap filter: {min_gap})")
+    print(f"Average BALD score for pairs (min_gap={min_gap}): {np.mean(scores)} from {len(scores)} candidates (attempts={attempts}).")
     if logger is not None:
-        logger.record("active_learning/avg_bald_score", float(np.mean(scores)))
-        logger.record("active_learning/bald_variance", float(np.var(scores)))
+        logger.record("active_learning/avg_bald_score", np.mean(scores))
+        logger.record("active_learning/bald_variance", np.var(scores))
         logger.dump(iteration)
     return pairs, scores
 

@@ -112,7 +112,7 @@ def train_reward_model_batched(
                 else:
                     r1 = model(s1, a1).sum(dim=1)
                     r2 = model(s2, a2).sum(dim=1)
-                    
+
                 logits = r1 - r2
                 loss = nn.BCEWithLogitsLoss()(logits, prefs)
                 # L2 regularization on rewards
@@ -137,12 +137,10 @@ def train_reward_model_batched(
                     mean_rewards, var_rewards = model(eval_states, eval_actions)
                     predicted_mean = mean_rewards.sum(dim=1)
                     predicted_var = var_rewards.sum(dim=1)
-                    # Gaussian Negative Log Likelihood Loss
                     loss = nn.GaussianNLLLoss()(predicted_mean, eval_ratings, predicted_var)
                 else:
                     predicted_segment_rewards = model(eval_states, eval_actions).sum(dim=1)
                     loss = nn.MSELoss()(predicted_segment_rewards, eval_ratings)
-
                 total_loss = loss
                 total_loss.backward()
                 optimizer.step()

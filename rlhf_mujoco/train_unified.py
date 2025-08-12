@@ -14,6 +14,7 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import ConcatDataset
 import numpy as np
+
 # Active learning balancing hyperparameters
 ACTIVE_PREF_FRACTION = 0.5          # Target fraction of preference items in each BALD acquisition
 MIN_PREF_PER_ITER = 2               # Hard minimum number of preference pairs per iteration when any target points allocated
@@ -32,7 +33,7 @@ from reward_ensemble import RewardEnsemble, select_high_variance_pairs
 from evaluative import EvaluativeDataset, annotate_evaluative
 
 from torch.utils.tensorboard import SummaryWriter
-from configs.cheetah import *
+from configs.swimmer import *
 import shutil
 import numpy as np
 
@@ -458,11 +459,12 @@ def run_training(
             # 1. Get BALD scores for preference pairs (with min_gap filtering)
             pref_cand_pairs, pref_scores = get_bald_scores_for_pairs(
                 clips_ds, reward_model, pool_size=bald_pool_size, T=bald_t, device=device,
-                min_gap=current_min_gap
+                logger=policy.logger, iteration=it
             )
             # 2. Get BALD scores for evaluative clips
             eval_cand_clips, eval_scores = get_bald_scores_for_clips(
-                clips_ds, reward_model, T=bald_t, device=device, rating_range=EVALUATIVE_RATING_RANGE
+                clips_ds, reward_model, T=bald_t, device=device, rating_range=EVALUATIVE_RATING_RANGE,
+                logger=policy.logger, iteration=it
             )
 
             if pref_cand_pairs:
@@ -574,10 +576,26 @@ def run_training(
 
         policy.logger.record("params/num_train_pref_data", len(train_pref_ds))
         policy.logger.record("params/num_train_eval_data", len(train_eval_ds))
+        policy.logger.record("active_learning/target_points_this_iter", target_points_this_iter)
+        if use_bald and 'desired_pref' in locals() and 'desired_eval' in locals():
+            policy.logger.record("active_learning/desired_pref_quota", desired_pref)
+            policy.logger.record("active_learning/desired_eval_quota", desired_eval)
         
         train_dataset = ConcatDataset([train_pref_ds, train_eval_ds])
         val_dataset = ConcatDataset([val_pref_ds, val_eval_ds])
         policy.logger.record("params/num_train_data", len(train_dataset))
+        # Flush SB3 logger now (since we're outside policy.learn())
+        policy.logger.dump(it)
+        # Mirror to SummaryWriter for convenience
+        writer.add_scalar("params/num_train_pref_data", len(train_pref_ds), it)
+        writer.add_scalar("params/num_train_eval_data", len(train_eval_ds), it)
+        writer.add_scalar("params/num_train_data", len(train_dataset), it)
+        writer.add_scalar("params/segment_length", current_segment_len, it)
+        writer.add_scalar("active_learning/target_points_this_iter", target_points_this_iter, it)
+        if use_bald and 'desired_pref' in locals() and 'desired_eval' in locals():
+            writer.add_scalar("active_learning/desired_pref_quota", desired_pref, it)
+            writer.add_scalar("active_learning/desired_eval_quota", desired_eval, it)
+        writer.flush()
 
         if use_random_sampling or use_bald:
             if len(train_dataset) > 0:
