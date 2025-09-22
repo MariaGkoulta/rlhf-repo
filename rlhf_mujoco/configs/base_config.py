@@ -46,3 +46,9 @@ EVALUATIVE_RATING_BINS = 10  # Number of rating bins for evaluative feedback (1-
 DISCOUNT_FACTOR = 0.99  # Gamma for discounted return calculation
 EVALUATIVE_RATING_RANGE = (0, 10)  # Range of ratings for evaluative feedback
 EVALUATIVE_RATING_SCALE = 10
+
+# Noise strength (beta) for simulated annotator noise
+# Preference feedback (Bradley–Terry): smaller beta => more noise (closer to random)
+# Evaluative feedback (Gaussian on ratings): larger beta => more noise (larger sigma)
+PREF_BETA = 1
+EVAL_BETA = 1
