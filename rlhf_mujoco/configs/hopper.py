@@ -6,7 +6,6 @@ SEGMENT_LEN = 50 # Length of segments to extract from clips
 INITIAL_SEGMENT_LEN = 50 # Length of segments to extract from clips
 FINAL_SEGMENT_LEN = 50 # Length of segments to extract from clips
 
-USE_BALD = False
 TOTAL_TARGET_PAIRS = 1000
 TOTAL_PPO_TIMESTEPS = 3e6
 

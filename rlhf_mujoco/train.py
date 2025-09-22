@@ -18,22 +18,16 @@ from preferences import (
 )
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 from reward import RewardModel, train_reward_model_batched
-from bald import select_active_pairs
-from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred
 from custom_env import LearnedRewardEnv
 from reward_ensemble import RewardEnsemble, select_high_variance_pairs
 from evaluative import EvaluativeDataset, annotate_evaluative
-
-from preferences import PreferenceDataset, clip_return, annotate_pairs
-from reward import RewardModel, train_reward_model_batched
 from bald import select_active_pairs, select_active_clips_for_evaluation
 from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred, plot_preference_heatmap, plot_bald_evaluative_selection_distribution
-from custom_env import LearnedRewardEnv
-from utils import TrueRewardCallback, NoSeedArgumentWrapper
 
 from torch.utils.tensorboard import SummaryWriter
-from configs.cheetah import *
+from configs.swimmer import *
 import shutil
+import numpy as np
 
 if FEEDBACK_TYPE == "evaluative":
     NORMALIZE_REWARDS = False  # Evaluative feedback does not require reward normalization
@@ -147,23 +141,6 @@ def sample_evaluative_data(clips, num_samples):
         rating_range=EVALUATIVE_RATING_RANGE,
     )
     return evaluative_data
-
-def linear_schedule(initial_value: float):
-    """
-    Linear learning rate schedule.
-    :param initial_value: Initial learning rate.
-    :return: schedule that computes
-        current learning rate depending on remaining progress
-    """
-    def func(progress_remaining: float) -> float:
-        """
-        Progress will decrease from 1 (beginning) to 0.
-        :param progress_remaining:
-        :return: current learning rate
-        """
-        return progress_remaining * initial_value
-
-    return func
 
 def run_training(
     env_id,
@@ -408,7 +385,6 @@ def run_training(
             target_num_segments_if_extracting_per_update if extract_segments else None
         )
 
-        import numpy as np
         def stack_obs_acts(clip, device='cpu'):
             obs = torch.tensor(np.stack(clip['obs']), dtype=torch.float32, device=device)
             acts = torch.tensor(np.stack(clip['acts']), dtype=torch.float32, device=device)
@@ -704,7 +680,6 @@ def main():
         rm_dropout_prob = BALD_REWARD_MODEL_DROPOUT_PROB
     else:
         rm_dropout_prob = REWARD_MODEL_DROPOUT_PROB
-    
     
     run_training(
         env_id=env_id,
