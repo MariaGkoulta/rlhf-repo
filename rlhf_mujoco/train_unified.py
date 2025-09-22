@@ -14,7 +14,6 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import ConcatDataset
 import numpy as np
-
 # Active learning balancing hyperparameters
 ACTIVE_PREF_FRACTION = 0.5          # Target fraction of preference items in each BALD acquisition
 MIN_PREF_PER_ITER = 2               # Hard minimum number of preference pairs per iteration when any target points allocated
@@ -33,7 +32,7 @@ from reward_ensemble import RewardEnsemble, select_high_variance_pairs
 from evaluative import EvaluativeDataset, annotate_evaluative
 
 from torch.utils.tensorboard import SummaryWriter
-from configs.swimmer import *
+from configs.walker import *
 import shutil
 import numpy as np
 
@@ -127,16 +126,16 @@ def extract_segments_from_episodes(
     print(f"Extracted {len(output_segments)} segments of length {segment_len} from {len(episodes)} episodes.")
     return output_segments
 
-def sample_random_preferences(clips, num_samples, min_gap):
+def sample_random_preferences(clips, num_samples, min_gap, noisy: bool = False, beta: float = 0.5):
     cand_pairs = []
     while len(cand_pairs) < num_samples:
         c1, c2 = random.sample(clips, 2)
         if abs(sum(c1["rews"]) - sum(c2["rews"])) >= min_gap:
             cand_pairs.append((c1, c2))
-    prefs, _, _ = annotate_pairs(cand_pairs, min_gap=min_gap)
+    prefs, _, _ = annotate_pairs(cand_pairs, min_gap=min_gap, beta=(beta if noisy else None))
     return prefs
 
-def sample_evaluative_data(clips, num_samples):
+def sample_evaluative_data(clips, num_samples, noisy: bool = False, beta: float = 0.5):
     """Sample clips for evaluative feedback annotation."""
     num_to_sample = min(len(clips), num_samples)
     if num_to_sample == 0:
@@ -146,6 +145,8 @@ def sample_evaluative_data(clips, num_samples):
         selected_clips, 
         num_bins=EVALUATIVE_RATING_BINS,
         rating_range=EVALUATIVE_RATING_RANGE,
+        noisy=noisy,
+        beta=beta,
     )
     return evaluative_data, annotated_clips, true_rewards
 
@@ -185,9 +186,13 @@ def run_training(
     target_num_segments_if_extracting_per_update,
     initial_min_gap, final_min_gap,
     max_episode_steps, normalize_rewards, terminate_when_unhealthy,
-    use_probabilistic_model
+    use_probabilistic_model,
+    adaptive_quota=False,
+    noisy_feedback: bool = False,
+    pref_beta: float = 0.5,
+    eval_beta: float = 0.5
 ):
-    writer = SummaryWriter(log_dir=run_log_dir)
+    writer = SummaryWriter(log_dir=os.path.join(run_log_dir, "custom"))
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     train_pref_ds = PreferenceDataset(device=device, segment_len=final_segment_len)
@@ -245,7 +250,10 @@ def run_training(
 
     # Collect initial preferences
     if len(clips_ds) >= 2:
-        initial_prefs = sample_random_preferences(clips_ds, num_initial_prefs, current_min_gap)
+        initial_prefs = sample_random_preferences(
+            clips_ds, num_initial_prefs, current_min_gap,
+            noisy=noisy_feedback, beta=pref_beta
+        )
     else:
         initial_prefs = []
     print(f"Generated {len(initial_prefs)} initial preference pairs.")
@@ -260,7 +268,7 @@ def run_training(
     print(f"Split initial preferences into {len(train_pref_ds)} training and {len(val_pref_ds)} validation pairs.")
 
     # Collect initial evaluative data
-    initial_eval_data, _, _ = sample_evaluative_data(clips_ds, num_initial_evals)
+    initial_eval_data, _, _ = sample_evaluative_data(clips_ds, num_initial_evals, noisy=noisy_feedback, beta=eval_beta)
     print(f"Generated {len(initial_eval_data)} initial evaluative data points.")
     random.shuffle(initial_eval_data)
     val_split_idx_eval = int(len(initial_eval_data) * 0.2)
@@ -357,6 +365,12 @@ def run_training(
             callback=callback
         )
 
+        # Ensure PPO's train/* metrics are flushed at the correct global step
+        try:
+            policy.logger.dump(step=policy.num_timesteps)
+        except Exception:
+            pass
+
         T_cumulative_ppo_steps_in_loop += ppo_timesteps_per_iter
 
         current_segment_len = int(initial_segment_len + (final_segment_len - initial_segment_len) * fraction_ppo_training_done)
@@ -439,33 +453,59 @@ def run_training(
             if num_new_prefs > 0:
                 cand_pairs = sample_random_pairs(clips_ds, num_new_prefs, current_min_gap)
                 if cand_pairs:
-                    new_prefs, _, _ = annotate_pairs(cand_pairs, min_gap=current_min_gap)
+                    new_prefs, _, _ = annotate_pairs(cand_pairs, min_gap=current_min_gap, beta=(pref_beta if noisy_feedback else None))
                     print(f"Iteration {it}: Randomly selected {len(new_prefs)} preference pairs.")
 
             if num_new_evals > 0:
-                new_evaluative_data, _, _ = sample_evaluative_data(clips_ds, num_new_evals)
+                new_evaluative_data, _, _ = sample_evaluative_data(clips_ds, num_new_evals, noisy=noisy_feedback, beta=eval_beta)
                 print(f"Iteration {it}: Randomly selected {len(new_evaluative_data)} clips for evaluation.")
 
         elif use_bald and target_points_this_iter > 0 and len(clips_ds) > 1:
             print("Acquiring data via BALD from a combined pool.")
             bald_pool_size = target_points_this_iter * 100  # Create a pool of candidates
 
-            # Desired counts per modality (rounded) + minimum safeguard
-            desired_pref = max(MIN_PREF_PER_ITER, int(target_points_this_iter * ACTIVE_PREF_FRACTION))
-            desired_eval = target_points_this_iter - desired_pref
-            if desired_eval < 0:
-                desired_eval = 0
+            # Desired counts per modality
+            # - Default: fixed ACTIVE_PREF_FRACTION with minimum safeguard
+            # - Adaptive (if flag enabled): allocate by ratio of average BALD scores across modalities
 
             # 1. Get BALD scores for preference pairs (with min_gap filtering)
             pref_cand_pairs, pref_scores = get_bald_scores_for_pairs(
                 clips_ds, reward_model, pool_size=bald_pool_size, T=bald_t, device=device,
-                logger=policy.logger, iteration=it
+                logger=policy.logger, iteration=reward_logger_iteration, min_gap=current_min_gap
             )
             # 2. Get BALD scores for evaluative clips
             eval_cand_clips, eval_scores = get_bald_scores_for_clips(
                 clips_ds, reward_model, T=bald_t, device=device, rating_range=EVALUATIVE_RATING_RANGE,
-                logger=policy.logger, iteration=it
+                logger=policy.logger, iteration=reward_logger_iteration
             )
+
+            if adaptive_quota:
+                avg_pref = float(np.mean(pref_scores)) if len(pref_scores) > 0 else 0.0
+                avg_eval = float(np.mean(eval_scores)) if len(eval_scores) > 0 else 0.0
+                if avg_pref <= 0 and avg_eval <= 0:
+                    desired_pref = target_points_this_iter // 2
+                elif avg_eval <= 0:
+                    desired_pref = target_points_this_iter
+                elif avg_pref <= 0:
+                    desired_pref = 0
+                else:
+                    pref_fraction = avg_pref / (avg_pref + avg_eval)
+                    desired_pref = int(round(target_points_this_iter * pref_fraction))
+                desired_pref = max(0, min(desired_pref, target_points_this_iter))
+                desired_eval = target_points_this_iter - desired_pref
+                print(f"Adaptive quota enabled: avg_pref={avg_pref:.4f}, avg_eval={avg_eval:.4f} -> desired_pref={desired_pref}, desired_eval={desired_eval}")
+                try:
+                    policy.logger.record("active_learning/adaptive_avg_pref_bald", avg_pref)
+                    policy.logger.record("active_learning/adaptive_avg_eval_bald", avg_eval)
+                    policy.logger.record("active_learning/adaptive_desired_pref", desired_pref)
+                    policy.logger.record("active_learning/adaptive_desired_eval", desired_eval)
+                except Exception:
+                    pass
+            else:
+                desired_pref = max(MIN_PREF_PER_ITER, int(target_points_this_iter * ACTIVE_PREF_FRACTION))
+                desired_eval = target_points_this_iter - desired_pref
+                if desired_eval < 0:
+                    desired_eval = 0
 
             if pref_cand_pairs:
                 print(f"Top preference pairs by BALD score: {np.mean(pref_scores[:5])}")
@@ -476,86 +516,31 @@ def run_training(
             else:
                 print("No evaluative candidates available.")
 
-            # Normalize within modality by rank (0..1)
-            def rank_normalize(scores):
-                if not scores:
-                    return []
-                arr = np.array(scores)
-                ranks = np.argsort(np.argsort(-arr))  # 0 = best
-                return 1.0 - ranks / max(1, len(arr) - 1)
-
-            pref_rank_norm = rank_normalize(pref_scores)
-            eval_rank_norm = rank_normalize(eval_scores)
-
-            # Build modality-specific lists of (norm_score, raw_score, item)
-            pref_list = list(zip(pref_rank_norm, pref_scores, pref_cand_pairs))
-            eval_list = list(zip(eval_rank_norm, eval_scores, eval_cand_clips))
+            # Build modality-specific lists of (raw_score, item) using raw BALD scores directly
+            pref_list = list(zip(pref_scores, pref_cand_pairs))
+            eval_list = list(zip(eval_scores, eval_cand_clips))
 
             # Selection respecting quotas
             selected_pairs = []
             selected_clips = []
 
-            if RANK_MERGE_ALTERNATE:
-                # Alternate taking highest remaining rank from each modality until quotas met
-                pref_idx, eval_idx = 0, 0
-                while (len(selected_pairs) + len(selected_clips)) < target_points_this_iter:
-                    take_pref = (len(selected_pairs) < desired_pref) and pref_idx < len(pref_list)
-                    take_eval = (len(selected_clips) < desired_eval) and eval_idx < len(eval_list)
-
-                    if not take_pref and not take_eval:
-                        # If one modality exhausted, fill from the other (if any left)
-                        if pref_idx < len(pref_list):
-                            take_pref = len(selected_pairs) < desired_pref
-                        elif eval_idx < len(eval_list):
-                            take_eval = len(selected_clips) < desired_eval
-
-                    if take_pref and take_eval:
-                        # Choose the modality with higher normalized rank score next (greedy interleave)
-                        if pref_list[pref_idx][0] >= eval_list[eval_idx][0]:
-                            take_eval = False
-                        else:
-                            take_pref = False
-
-                    if take_pref:
-                        selected_pairs.append(pref_list[pref_idx][2])
-                        pref_idx += 1
-                    elif take_eval:
-                        selected_clips.append(eval_list[eval_idx][2])
-                        eval_idx += 1
-                    else:
-                        break
+            if adaptive_quota:
+                # Greedy per modality using adaptive quotas derived from average BALD scores
+                selected_pairs = [p for _, p in pref_list[:desired_pref]]
+                selected_clips = [c for _, c in eval_list[:desired_eval]]
             else:
-                # Greedy within each modality independently
-                selected_pairs = [p for _, _, p in pref_list[:desired_pref]]
-                selected_clips = [c for _, _, c in eval_list[:desired_eval]]
-
-            # If quotas not met due to scarcity, backfill from whichever modality still has candidates
-            total_needed = target_points_this_iter - (len(selected_pairs) + len(selected_clips))
-            if total_needed > 0:
-                # Remaining pools (skip already used)
-                remaining_pref = pref_list[len(selected_pairs):]
-                remaining_eval = eval_list[len(selected_clips):]
-                merged_remaining = sorted(
-                    [(m, ns, rs, item) for m, pool in [('pref', remaining_pref), ('eval', remaining_eval)]
-                     for (ns, rs, item) in pool],
-                    key=lambda x: x[1], reverse=True
-                )
-                for m, _, _, item in merged_remaining:
-                    if len(selected_pairs) + len(selected_clips) >= target_points_this_iter:
-                        break
-                    if m == 'pref':
-                        selected_pairs.append(item)
-                    else:
-                        selected_clips.append(item)
+                selected_pairs = [p for _, p in pref_list[:desired_pref]]
+                selected_clips = [c for _, c in eval_list[:desired_eval]]
 
             if selected_pairs:
-                new_prefs, _, _ = annotate_pairs(selected_pairs, min_gap=current_min_gap)
+                new_prefs, _, _ = annotate_pairs(selected_pairs, min_gap=current_min_gap, beta=(pref_beta if noisy_feedback else None))
                 print(f"Iteration {it}: BALD selected {len(new_prefs)} preference pairs (requested {desired_pref}).")
             if selected_clips:
-                new_evaluative_data, _, _ = annotate_evaluative(
-                    selected_clips, num_bins=EVALUATIVE_RATING_BINS, rating_range=EVALUATIVE_RATING_RANGE
-                )
-                print(f"Iteration {it}: BALD selected {len(new_evaluative_data)} evaluative clips (requested {desired_eval}).")
+                    new_evaluative_data, _, _ = annotate_evaluative(
+                        selected_clips, num_bins=EVALUATIVE_RATING_BINS, rating_range=EVALUATIVE_RATING_RANGE,
+                noisy=noisy_feedback, beta=eval_beta
+                    )
+                    print(f"Iteration {it}: BALD selected {len(new_evaluative_data)} evaluative clips (requested {desired_eval}).")
         
         # Add newly acquired data to the respective datasets
         if new_prefs:
@@ -576,26 +561,10 @@ def run_training(
 
         policy.logger.record("params/num_train_pref_data", len(train_pref_ds))
         policy.logger.record("params/num_train_eval_data", len(train_eval_ds))
-        policy.logger.record("active_learning/target_points_this_iter", target_points_this_iter)
-        if use_bald and 'desired_pref' in locals() and 'desired_eval' in locals():
-            policy.logger.record("active_learning/desired_pref_quota", desired_pref)
-            policy.logger.record("active_learning/desired_eval_quota", desired_eval)
         
         train_dataset = ConcatDataset([train_pref_ds, train_eval_ds])
         val_dataset = ConcatDataset([val_pref_ds, val_eval_ds])
         policy.logger.record("params/num_train_data", len(train_dataset))
-        # Flush SB3 logger now (since we're outside policy.learn())
-        policy.logger.dump(it)
-        # Mirror to SummaryWriter for convenience
-        writer.add_scalar("params/num_train_pref_data", len(train_pref_ds), it)
-        writer.add_scalar("params/num_train_eval_data", len(train_eval_ds), it)
-        writer.add_scalar("params/num_train_data", len(train_dataset), it)
-        writer.add_scalar("params/segment_length", current_segment_len, it)
-        writer.add_scalar("active_learning/target_points_this_iter", target_points_this_iter, it)
-        if use_bald and 'desired_pref' in locals() and 'desired_eval' in locals():
-            writer.add_scalar("active_learning/desired_pref_quota", desired_pref, it)
-            writer.add_scalar("active_learning/desired_eval_quota", desired_eval, it)
-        writer.flush()
 
         if use_random_sampling or use_bald:
             if len(train_dataset) > 0:
@@ -637,6 +606,20 @@ def run_training(
                 plot_correlation_by_bin(clips_ds, reward_ensemble, it, results_dir, writer=writer)
                 policy.save(os.path.join(results_dir, f"ppo_{env_id}_iter_{it}.zip"))
                 torch.save(reward_ensemble.state_dict(), os.path.join(results_dir, f"rm_iter_{it}.pth"))
+
+        # --- Flush & align logging ---
+        # Record the outer iteration explicitly; dump so metrics (dataset sizes, segment length, etc.)
+        # logged this loop are written at the current global timestep.
+        try:
+            policy.logger.record("training/iteration", it)
+            policy.logger.dump(step=policy.num_timesteps)
+        except Exception:
+            pass
+        # Flush custom writer (plots) to disk as well
+        try:
+            writer.flush()
+        except Exception:
+            pass
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     policy.save(os.path.join(results_dir, f"ppo_final_{timestamp}.zip"))
@@ -689,6 +672,9 @@ def main():
                        help="sample preference pairs via BALD active learning")
     group.add_argument("--ensemble", action="store_true",
                        help="sample preference pairs via ensemble-based active learning")
+    parser.add_argument("--adaptive-quota", action="store_true",
+                        help="When using --bald, adapt the preference/evaluative quota this iteration based on the ratio of their average BALD scores.")
+    parser.add_argument("--noisy", action="store_true", help="Simulate noisy feedback using beta=0.5.")
     args = parser.parse_args()
 
     if args.bald:
@@ -723,7 +709,11 @@ def main():
     config_dst = os.path.join(results_dir, config_filename)
     shutil.copyfile(config_src, config_dst)
 
-    shared_log_dir = f"./logs/{experiment_time}/{env_id}/"
+    # create string with preference beta
+    pref_beta = f"pref_beta_{PREF_BETA}"
+    eval_beta = f"eval_beta_{EVAL_BETA}"
+
+    shared_log_dir = f"./logs/{experiment_time}/{pref_beta}{eval_beta}/{env_id}/"
     run_log_dir = f"{shared_log_dir}{experiment_type}_{timestamp}/"
 
     if use_bald:
@@ -771,7 +761,11 @@ def main():
         max_episode_steps=MAX_EPISODE_STEPS,
         normalize_rewards=NORMALIZE_REWARDS,
         terminate_when_unhealthy=TERMINATE_WHEN_UNHEALTHY,
-        use_probabilistic_model=USE_PROBABILISTIC_MODEL
+        use_probabilistic_model=USE_PROBABILISTIC_MODEL,
+        adaptive_quota=args.adaptive_quota,
+        noisy_feedback=args.noisy,
+        pref_beta=PREF_BETA,
+        eval_beta=EVAL_BETA
     )
 
 
