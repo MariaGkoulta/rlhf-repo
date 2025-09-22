@@ -8,6 +8,20 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 from plots import plot_bins
 
+# Helper to sample from a truncated normal distribution via simple rejection sampling
+def _sample_truncated_normal(mu: float, sigma: float, lower: float, upper: float, rng: np.random.Generator | None = None) -> float:
+    """Draw one sample from N(mu, sigma^2) truncated to [lower, upper]."""
+    if rng is None:
+        rng = np.random.default_rng()
+    if sigma <= 0:
+        # Degenerate case: return clipped mean
+        return float(np.clip(mu, lower, upper))
+    # Rejection sampling; for the given bounds and sigma in this project, it will be fast
+    while True:
+        x = rng.normal(mu, sigma)
+        if lower <= x <= upper:
+            return float(x)
+
 NUM_PAIRS = 2000
 MIN_GAP = 2
 DEFAULT_SAMPLES_PER_OTHER_BIN = 20
@@ -68,7 +82,7 @@ class EvaluativeDataset(Dataset):
     def __getitem__(self, idx):
         return self.states[idx], self.actions[idx], self.ratings[idx]
 
-def annotate_evaluative(clips, num_bins=10, rating_range=None, gamma=0.99):
+def annotate_evaluative(clips, num_bins=10, rating_range=None, gamma=0.99, noisy: bool = False, beta: float = 0.5):
     """
     Annotates clips with evaluative ratings based on discounted returns.
     Uses a fixed rating range for Hopper, otherwise calculates it from the clips.
@@ -86,7 +100,16 @@ def annotate_evaluative(clips, num_bins=10, rating_range=None, gamma=0.99):
         print(f"Clipped return: {clipped_return}")
         rating = np.digitize(clipped_return, bin_edges[1:-1])
         print(f"Rating for clip: {rating}")
-        evaluative_data.append((clip, float(rating)))
+        if noisy:
+            # Add truncated Gaussian noise directly to 0-based bin rating
+            baseline = float(rating)
+            sigma = beta * 10.0
+            noise = _sample_truncated_normal(mu=0.0, sigma=sigma, lower=1.0, upper=10.0)
+            noisy_rating = baseline + noise
+            evaluative_data.append((clip, float(noisy_rating)))
+        else:
+            # Keep original 0..num_bins-1 rating without offset
+            evaluative_data.append((clip, float(rating)))
     return evaluative_data, returns, bin_edges
 
 def calculate_return(clip, gamma=0.99):
