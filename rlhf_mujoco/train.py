@@ -12,10 +12,7 @@ from stable_baselines3.common.vec_env import VecMonitor
 from gymnasium.wrappers import TimeLimit
 from tqdm import tqdm
 
-from preferences import (
-    PreferenceDataset, clip_return,
-    annotate_pairs
-)
+from preferences import (PreferenceDataset, clip_return, annotate_pairs)
 from utils import TrueRewardCallback, NoSeedArgumentWrapper
 from reward import RewardModel, train_reward_model_batched
 from custom_env import LearnedRewardEnv
@@ -25,7 +22,7 @@ from bald import select_active_pairs, select_active_clips_for_evaluation
 from plots import plot_correlation_by_bin, plot_rewards, plot_true_vs_pred, plot_preference_heatmap, plot_bald_evaluative_selection_distribution
 
 from torch.utils.tensorboard import SummaryWriter
-from configs.swimmer import *
+from configs.cheetah import *
 import shutil
 import numpy as np
 
@@ -120,25 +117,27 @@ def extract_segments_from_episodes(
     print(f"Extracted {len(output_segments)} segments of length {segment_len} from {len(episodes)} episodes.")
     return output_segments
 
-def sample_random_preferences(clips, num_samples, min_gap):
+def sample_random_preferences(clips, num_samples, min_gap, noisy: bool = False, beta: float = 0.5):
     cand_pairs = []
     while len(cand_pairs) < num_samples:
         c1, c2 = random.sample(clips, 2)
         if abs(sum(c1["rews"]) - sum(c2["rews"])) >= min_gap:
             cand_pairs.append((c1, c2))
-    prefs, _, _ = annotate_pairs(cand_pairs, min_gap=min_gap)
+    prefs, _, _ = annotate_pairs(cand_pairs, min_gap=min_gap, beta=(beta if noisy else None))
     return prefs
 
-def sample_evaluative_data(clips, num_samples):
+def sample_evaluative_data(clips, num_samples, noisy: bool = False, beta: float = 0.5):
     """Sample clips for evaluative feedback annotation."""
     num_to_sample = min(len(clips), num_samples)
     if num_to_sample == 0:
-        return [], [], []
+        return []
     selected_clips = random.sample(clips, num_to_sample)
     evaluative_data, _, _ = annotate_evaluative(
         selected_clips, 
         num_bins=EVALUATIVE_RATING_BINS,
         rating_range=EVALUATIVE_RATING_RANGE,
+        noisy=noisy,
+        beta=beta,
     )
     return evaluative_data
 
@@ -162,7 +161,10 @@ def run_training(
     initial_min_gap, final_min_gap,
     max_episode_steps, normalize_rewards, terminate_when_unhealthy,
     use_probabilistic_model=False,  # Add new parameter
-    use_ground_truth=False
+    use_ground_truth=False,
+    noisy_feedback: bool = False,
+    pref_beta: float = 0.5,
+    eval_beta: float = 0.5
 ):
     writer = SummaryWriter(log_dir=run_log_dir)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -231,9 +233,12 @@ def run_training(
         if FEEDBACK_TYPE == "preference":
             num_rand_initial = initial_target_pairs
             print(f"Initial collection (random): targeting num_rand_initial = {num_rand_initial}")
-            if len(clips_ds) >= 2: 
-                    _prefs_list = sample_random_preferences(clips_ds, num_rand_initial, current_min_gap) # Use calculated value
-                    prefs = _prefs_list
+            prefs = []
+            if len(clips_ds) >= 2:
+                _prefs_list = sample_random_preferences(
+                    clips_ds, num_rand_initial, current_min_gap, noisy=noisy_feedback, beta=pref_beta
+                )
+                prefs = _prefs_list
             else:
                 print(f"Initial collection (random): clips_ds has fewer than 2 segments ({len(clips_ds)}). Cannot sample pairs.")
 
@@ -251,7 +256,7 @@ def run_training(
             print(f"Split initial preferences into {len(train_pref_ds)} training and {len(val_pref_ds)} validation pairs.")
         
         elif FEEDBACK_TYPE == "evaluative":
-            evaluative_data = sample_evaluative_data(clips_ds, initial_target_pairs)
+            evaluative_data = sample_evaluative_data(clips_ds, initial_target_pairs, noisy=noisy_feedback, beta=eval_beta)
             print(f"Generated {len(evaluative_data)} initial evaluative data points.")
             
             random.shuffle(evaluative_data)
@@ -449,7 +454,7 @@ def run_training(
                 num_rand_iter_loop = target_points_this_iter
 
                 if use_random_sampling:
-                    new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop, current_min_gap)
+                    new_prefs = sample_random_preferences(clips_ds, num_rand_iter_loop, current_min_gap, noisy=noisy_feedback, beta=pref_beta)
                     print(f"Iteration {it}: sampled {len(new_prefs)}.")
 
                 if use_bald:
@@ -467,7 +472,7 @@ def run_training(
                             results_dir=results_dir
                         )
                     if cand_pairs:
-                        _annotated_prefs, _, rewards_log = annotate_pairs(cand_pairs, min_gap=current_min_gap)
+                        _annotated_prefs, _, rewards_log = annotate_pairs(cand_pairs, min_gap=current_min_gap, beta=(pref_beta if noisy_feedback else None))
                         new_prefs = _annotated_prefs
                         print(f"Iteration {it}: BALD targeted {target_points_this_iter} (effective K {effective_bald_k}), selected {len(new_prefs)} pairs.")
 
@@ -518,10 +523,12 @@ def run_training(
                         selected_clips,
                         num_bins=EVALUATIVE_RATING_BINS,
                         rating_range=EVALUATIVE_RATING_RANGE,
+                        noisy=noisy_feedback,
+                        beta=eval_beta,
                     )
                     print(f"Iteration {it}: BALD selected {len(new_evaluative_data)} clips for evaluation.")
                 else:  # Fallback to random sampling for evaluative feedback
-                    new_evaluative_data = sample_evaluative_data(clips_ds, target_points_this_iter)
+                    new_evaluative_data = sample_evaluative_data(clips_ds, target_points_this_iter, noisy=noisy_feedback, beta=eval_beta)
                     print(f"Iteration {it}: Randomly generated {len(new_evaluative_data)} new evaluative data points.")
 
             for clip, rating in new_evaluative_data:
@@ -626,6 +633,7 @@ def main():
                        help="sample preference pairs via ensemble-based active learning")
     group.add_argument("--ground-truth", action="store_true",
                        help="run with ground truth reward")
+    parser.add_argument("--noisy", action="store_true", help="Simulate noisy feedback using beta=0.5.")
     args = parser.parse_args()
 
     use_ground_truth = False
@@ -673,7 +681,10 @@ def main():
     config_dst = os.path.join(results_dir, config_filename)
     shutil.copyfile(config_src, config_dst)
 
-    shared_log_dir = f"./logs/{experiment_time}/{env_id}/"
+    pref_beta = f"pref_beta_{PREF_BETA}"
+    eval_beta = f"eval_beta_{EVAL_BETA}"
+
+    shared_log_dir = f"./logs/{experiment_time}/{pref_beta}{eval_beta}/{env_id}/"
     run_log_dir = f"{shared_log_dir}{experiment_type}_{timestamp}_{model_type}_{FEEDBACK_TYPE}/"
 
     if use_bald:
@@ -721,7 +732,10 @@ def main():
         normalize_rewards=NORMALIZE_REWARDS,
         terminate_when_unhealthy=TERMINATE_WHEN_UNHEALTHY,
         use_probabilistic_model=USE_PROBABILISTIC_MODEL,
-        use_ground_truth=use_ground_truth
+        use_ground_truth=use_ground_truth,
+        noisy_feedback=args.noisy,
+        pref_beta=PREF_BETA,
+        eval_beta=EVAL_BETA
     )
 
 
