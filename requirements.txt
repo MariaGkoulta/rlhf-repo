@@ -1,11 +1,53 @@
-gymnasium>=0.28.1
+############################################################
+# Core numerical & ML
+############################################################
 numpy>=1.24.0
-torch>=2.0.0
+scipy>=1.10.0            # statistical functions (norm, logsumexp)
+torch>=2.0.0             # deep learning backbone
+scikit-learn>=1.2.0      # metrics / potential utilities
+
+############################################################
+# RL / Environments
+############################################################
+gymnasium[mujoco]>=0.28.1   # mujoco-based MuJoCo v4/v5 tasks
+stable-baselines3>=2.0.0    # PPO implementation
+mujoco>=3.0.0               # MuJoCo physics engine (official mujoco package)
+glfw>=2.5.0                 # rendering support for mujoco viewer
+
+############################################################
+# Visualization / Plotting
+############################################################
 matplotlib>=3.7.0
-line_profiler>=4.0.0
+seaborn>=0.12.2
+Pillow>=9.4.0              # image operations for plot embedding / video frames
+imageio>=2.27.0            # optional: video frame IO
+imageio-ffmpeg>=0.4.8      # ffmpeg backend for video writing
+
+############################################################
+# Logging / Experiment Tracking
+############################################################
 tqdm>=4.65.0
 pandas>=2.0.0
-scikit-learn>=1.2.0
-wandb>=0.15.0
-pytest>=7.3.1  
-jupyter>=1.0.0  # For running notebooks in the tutorials directory
+wandb>=0.15.0              # optional experiment tracking
+tensorboard>=2.13.0        # event processing for plotting scripts
+protobuf>=3.20.3           # pin to avoid tensorboard incompatibilities
+
+############################################################
+# Developer / Tooling
+############################################################
+line_profiler>=4.0.0
+pytest>=7.3.1
+jupyter>=1.0.0             # notebooks for analysis
+
+############################################################
+# Optional quality-of-life (commented out by default)
+############################################################
+# rich>=13.0.0             # nicer CLI output
+# black>=23.0.0            # code formatting
+# isort>=5.12.0            # import sorting
+
+############################################################
+# NOTE:
+# - Keep versions as lower bounds; pin (==) for full determinism if needed.
+# - If running headless (e.g., cluster), you may need: pip install mujoco==3.1.2 && export MUJOCO_GL=egl
+# - For CUDA-specific torch builds, install from PyTorch site instead of this generic spec.
