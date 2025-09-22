@@ -83,7 +83,9 @@ def annotate_pairs(pairs_to_annotate, min_gap=MIN_GAP, beta=None):
         if difference < min_gap:
             continue
         if beta is not None:
-            prob_c1_preferred = 1 / (1 + np.exp(-beta * (r1 - r2)))
+            print(beta)
+            # Bradley-Terry with temperature beta
+            prob_c1_preferred = 1.0 / (1.0 + np.exp(-beta * (r1 - r2)))
             preference = 1.0 if random.random() < prob_c1_preferred else 0.0
         else:
             preference = 1 if r1 > r2 else 0
