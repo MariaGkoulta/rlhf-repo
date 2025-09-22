@@ -93,12 +93,23 @@ def select_active_pairs(clips, model, pool_size=50_000, K=500, T=10, device='cpu
     pairs = [(clips[i], clips[j]) for i, j in pair_candidates]
     scores = [bald_score(model, c1, c2, T, device=device) for c1, c2 in pairs]
 
+    # Compute raw (nats) and normalized (bits) variants for logging
+    if PREF_BALD_NORM_BY_LOG2:
+        scores_bits = scores
+        scores_nats = [s * math.log(2) for s in scores]
+    else:
+        scores_nats = scores
+        scores_bits = [s / math.log(2) for s in scores]
+
     if results_dir:
         plot_bald_diagnostics(pairs, scores, results_dir, iteration)
 
     if logger is not None:
-        logger.record("active_learning/avg_bald_score", np.mean(scores))
-        logger.record("active_learning/bald_variance", np.var(scores))
+        # Log both normalized (bits) and unnormalized (nats)
+        logger.record("active_learning/avg_bald_score_bits", np.mean(scores_bits))
+        logger.record("active_learning/bald_variance_bits", np.var(scores_bits))
+        logger.record("active_learning/avg_bald_score_nats", np.mean(scores_nats))
+        logger.record("active_learning/bald_variance_nats", np.var(scores_nats))
         logger.dump(iteration)
 
     actual_K = min(K, len(scores))
@@ -130,8 +141,22 @@ def get_bald_scores_for_pairs(clips, model, pool_size, T, device, logger=None, i
     scores = [scores[i] for i in order]
     print(f"Average BALD score for pairs (min_gap={min_gap}): {np.mean(scores)} from {len(scores)} candidates (attempts={attempts}).")
     if logger is not None:
-        logger.record("active_learning/avg_bald_score", np.mean(scores))
-        logger.record("active_learning/bald_variance", np.var(scores))
+        # Ensure we log both normalized (bits) and unnormalized (nats), matching select_active_pairs
+        if PREF_BALD_NORM_BY_LOG2:
+            scores_bits = scores
+            scores_nats = [s * math.log(2) for s in scores]
+        else:
+            scores_nats = scores
+            scores_bits = [s / math.log(2) for s in scores]
+
+        # Backward-compatible tags
+        logger.record("active_learning/avg_bald_score", float(np.mean(scores)))
+        logger.record("active_learning/bald_variance", float(np.var(scores)))
+        # Explicit bits/nats tags
+        logger.record("active_learning/avg_bald_score_bits", float(np.mean(scores_bits)))
+        logger.record("active_learning/bald_variance_bits", float(np.var(scores_bits)))
+        logger.record("active_learning/avg_bald_score_nats", float(np.mean(scores_nats)))
+        logger.record("active_learning/bald_variance_nats", float(np.var(scores_nats)))
         logger.dump(iteration)
     return pairs, scores
 
@@ -185,18 +210,21 @@ def select_active_clips_for_evaluation(clips, model, K=500, T=10, device='cpu', 
         return [], [], []
     if not (hasattr(model, 'probabilistic') and model.probabilistic):
         raise ValueError("select_active_clips_for_evaluation requires a probabilistic model. Please set USE_PROBABILISTIC_MODEL to True in your config.")
-    scores = [evaluative_bald_score(model, c, T, device=device, rating_range=rating_range) for c in clips]
+    scores_raw = [evaluative_bald_score(model, c, T, device=device, rating_range=rating_range) for c in clips]
 
     # normalize evaluative BALD scores by running high percentile
     global _eval_bald_high
-    p = np.percentile(scores, EVAL_BALD_NORM_PERCENTILE)
+    p = np.percentile(scores_raw, EVAL_BALD_NORM_PERCENTILE)
     _eval_bald_high = max(_eval_bald_high, p)
-    scores = [s / _eval_bald_high for s in scores]
+    scores = [s / _eval_bald_high for s in scores_raw]
 
     all_rewards = [sum(c["rews"]) for c in clips]
     if logger is not None:
-        logger.record("active_learning/avg_evaluative_bald_score", np.mean(scores))
-        logger.record("active_learning/evaluative_bald_variance", np.var(scores))
+        # Normalized (unitless) and raw (nats) evaluative BALD
+        logger.record("active_learning/avg_evaluative_bald_score", float(np.mean(scores)))
+        logger.record("active_learning/evaluative_bald_variance", float(np.var(scores)))
+        logger.record("active_learning/avg_evaluative_bald_score_raw", float(np.mean(scores_raw)))
+        logger.record("active_learning/evaluative_bald_variance_raw", float(np.var(scores_raw)))
         logger.dump(iteration)
     actual_K = min(K, len(scores))
     idxs = np.argsort(scores)[-actual_K:]
@@ -211,14 +239,14 @@ def get_bald_scores_for_clips(clips, model, T, device, rating_range, num_samples
         selected_clips = [clips[i] for i in selected_indices]
     else:
         selected_clips = clips
-    scores = [evaluative_bald_score(model, c, T, device=device, rating_range=rating_range) for c in selected_clips]
+    scores_raw = [evaluative_bald_score(model, c, T, device=device, rating_range=rating_range) for c in selected_clips]
 
     # normalize evaluative BALD scores by running high percentile
     global _eval_bald_high
-    p = np.percentile(scores, EVAL_BALD_NORM_PERCENTILE)
+    p = np.percentile(scores_raw, EVAL_BALD_NORM_PERCENTILE)
     _eval_bald_high = max(_eval_bald_high, p)
     print(f"Running high percentile for evaluative BALD: {_eval_bald_high}")
-    scores = [s / _eval_bald_high for s in scores]
+    scores = [s / _eval_bald_high for s in scores_raw]
 
     # sort clips by descending BALD score
     clips = [selected_clips[i] for i in np.argsort(scores)[::-1]]
@@ -226,8 +254,10 @@ def get_bald_scores_for_clips(clips, model, T, device, rating_range, num_samples
 
     print(f"Average BALD score for selected clips: {np.mean(scores)}")
     if logger is not None:
-        logger.record("active_learning/avg_evaluative_bald_score", np.mean(scores))
-        logger.record("active_learning/evaluative_bald_variance", np.var(scores))
+        logger.record("active_learning/avg_evaluative_bald_score", float(np.mean(scores)))
+        logger.record("active_learning/evaluative_bald_variance", float(np.var(scores)))
+        logger.record("active_learning/avg_evaluative_bald_score_raw", float(np.mean(scores_raw)))
+        logger.record("active_learning/evaluative_bald_variance_raw", float(np.var(scores_raw)))
         logger.dump(iteration)
     return clips, scores
 
